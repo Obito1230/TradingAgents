@@ -1,0 +1,86 @@
+{
+  "_readme": "演示标的池(仅用于开发与演示;论文评估集必须按协议盲选,与结果无关)。\n\n【结算机制】L1 复盘只在“下次跑同一 ticker”时结算已实现收益,所以演示一次复盘需要两跑:先跑 trade_date 产生 pending 决策条目,再跑该 ticker 的任意更晚日期触发结算。trade_date 距今 ≥ ~35 天即可保证结算数据已存在。\n\n【分类取舍说明】\n- l1_extreme_win/loss:选 |max_abs| 最大、方向明确的场景做旗舰复盘演示;同一 ticker(MSFT)同时纳入 win+loss,便于展示“同一个名字的两种极端教训都被记住”。\n- crypto_edge:用 BTC-USD 1 月的 −29%(整池最大回撤),既覆盖“无基本面”边界,又作为加密资产的极端亏损样例。\n- cross_market:用 0700.HK 6 月 +15% 覆盖港股。注意:默认 ticker 列表里的 RELIANCE.NS 本次扫描 0 条候选(可能数据缺失或窗口内无 ≥5% 波动),非美覆盖目前仅港股,后续需单独核实。\n- routine_flow:本次扫描刻意过滤了 |move| < 5% 的场景,故无“平静期”候选。需要时用 --min-abs 0.01 重扫,或手动挑一个平稳日期,用于演示“普通场景不触发记忆、不打扰决策”。\n- no_data_edge:占位,演示 NO_DATA 哨兵(退市/无覆盖 ticker),不参与扫描。\n- ab_compare:直接复用旗舰场景(记忆开/关各跑一轮),保证对比与演示口径一致。",
+  "suggestions": [
+    { "ticker": "MSFT", "market": "US", "trade_date": "2026-07-23", "close": 380.863, "max_abs": 0.31 },
+    { "ticker": "MSFT", "market": "US", "trade_date": "2026-07-24", "close": 380.9828, "max_abs": 0.3099 },
+    { "ticker": "MSFT", "market": "US", "trade_date": "2026-07-27", "close": 388.3689, "max_abs": 0.3006 },
+    { "ticker": "BTC-USD", "market": "Crypto", "trade_date": "2026-01-26", "close": 88267.1406, "max_abs": 0.2896 },
+    { "ticker": "MSFT", "market": "US", "trade_date": "2026-07-28", "close": 392.6109, "max_abs": 0.2808 },
+    { "ticker": "MSFT", "market": "US", "trade_date": "2026-07-29", "close": 389.8062, "max_abs": 0.2609 },
+    { "ticker": "MSFT", "market": "US", "trade_date": "2026-07-22", "close": 389.6066, "max_abs": 0.2488 },
+    { "ticker": "MSFT", "market": "US", "trade_date": "2026-07-21", "close": 397.0026, "max_abs": 0.239 },
+    { "ticker": "BTC-USD", "market": "Crypto", "trade_date": "2026-01-28", "close": 89184.5703, "max_abs": 0.2232 },
+    { "ticker": "MSFT", "market": "US", "trade_date": "2026-07-20", "close": 401.5341, "max_abs": 0.2122 },
+    { "ticker": "BTC-USD", "market": "Crypto", "trade_date": "2026-01-27", "close": 89102.5703, "max_abs": 0.2082 },
+    { "ticker": "BTC-USD", "market": "Crypto", "trade_date": "2026-01-31", "close": 78621.1172, "max_abs": 0.2025 }
+  ],
+  "pool": {
+    "l1_extreme_win": [
+      {
+        "ticker": "MSFT",
+        "trade_date": "2026-07-23",
+        "close": 380.863,
+        "ret_5d": 0.1822,
+        "ret_10d": 0.31,
+        "direction": "win",
+        "why": "旗舰超额收益复盘:全池最大正收益(+31%/10日),方向明确,大概率自然触发 L1 事件写入。"
+      },
+      {
+        "ticker": "NVDA",
+        "trade_date": "2026-03-30",
+        "close": 164.9777,
+        "ret_5d": 0.0783,
+        "ret_10d": 0.1897,
+        "direction": "win",
+        "why": "第二个盈利样例(不同公司/不同月份),展示复盘机制非单一样本偶然。"
+      }
+    ],
+    "l1_extreme_loss": [
+      {
+        "ticker": "MSFT",
+        "trade_date": "2026-01-28",
+        "close": 478.5937,
+        "ret_5d": -0.14,
+        "ret_10d": -0.1604,
+        "direction": "loss",
+        "why": "旗舰意外亏损复盘:美股最大回撤样例;与 l1_extreme_win 同 ticker,便于演示“同名标的的正反两种教训都被记住”。"
+      }
+    ],
+    "routine_flow": [
+      {
+        "_todo": "当前扫描过滤了 |move|<5% 的场景,池内无平静期候选。演示“普通场景不触发记忆、不打扰决策”时:重跑 python scripts/scan_demo_pool.py --min-abs 0.01,或手动挑一个 5 日/10 日收益接近 0 的平稳日期。"
+      }
+    ],
+    "cross_market": [
+      {
+        "ticker": "0700.HK",
+        "trade_date": "2026-06-23",
+        "close": 414.8,
+        "ret_5d": 0.0362,
+        "ret_10d": 0.1543,
+        "direction": "win",
+        "why": "港股样例:演示带交易所后缀 ticker 的标识解析与区域基准 alpha;配合港股大盘环境展示跨市场能力。"
+      }
+    ],
+    "crypto_edge": [
+      {
+        "ticker": "BTC-USD",
+        "trade_date": "2026-01-26",
+        "close": 88267.1406,
+        "ret_5d": -0.1093,
+        "ret_10d": -0.2896,
+        "direction": "loss",
+        "why": "整池最大回撤(−29%/10日)+ 无基本面资产:一次同时覆盖“加密边界”与“极端亏损”两个演示点。"
+      }
+    ],
+    "no_data_edge": [
+      "<delisted / uncovered ticker; not scanned — used to demo the NO_DATA sentinel>"
+    ],
+    "ab_compare": [
+      { "ticker": "MSFT", "trade_date": "2026-07-23", "reason": "旗舰盈利,记忆开/关对比" },
+      { "ticker": "MSFT", "trade_date": "2026-01-28", "reason": "旗舰亏损,记忆开/关对比" },
+      { "ticker": "0700.HK", "trade_date": "2026-06-23", "reason": "跨市场,记忆开/关对比" },
+      { "ticker": "BTC-USD", "trade_date": "2026-01-26", "reason": "加密边界,记忆开/关对比" }
+    ]
+  }
+}

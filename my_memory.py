@@ -25,16 +25,6 @@ class TradingMemoryLog:
         # Optional cap on resolved entries. None disables rotation.
         self._max_entries = cfg.get("memory_log_max_entries")
 
-        # Three-layer memory: L1 events + L3 rules live in a separate lessons
-        # file so the append-only decision log keeps its audit semantics.
-        self._lessons_path = None
-        lessons = cfg.get("lessons_path")
-        if lessons:
-            self._lessons_path = Path(lessons).expanduser()
-            self._lessons_path.parent.mkdir(parents=True, exist_ok=True)
-        self._max_event_entries = cfg.get("max_event_entries")
-        self._event_protect_threshold = cfg.get("event_protect_threshold")
-
     # --- Write path (Phase A) ---
 
     def store_decision(
@@ -58,56 +48,6 @@ class TradingMemoryLog:
         with open(self._log_path, "a", encoding="utf-8") as f:
             f.write(entry)
 
-    # --- Lessons write path (L1 events) ---
-
-    @staticmethod
-    def _format_pct(value: float) -> str:
-        return f"{value:+.1%}"
-
-    @staticmethod
-    def _parse_pct(text: str) -> float | None:
-        """Parse a '+5.0%' style string back to a float ratio, or None."""
-        text = (text or "").strip()
-        if not text or text.lower() in {"n/a", "none", "null", "-"}:
-            return None
-        try:
-            return float(text.rstrip("%")) / 100.0
-        except ValueError:
-            return None
-
-    def store_event(
-        self,
-        entry_id: str,
-        ticker: str,
-        trade_date: str,
-        rating: str,
-        alpha: float,
-        raw: float,
-        summary: str,
-        context_pointer: str,
-        fingerprint: str = "",
-    ) -> None:
-        """Append an L1 EVENT entry to the lessons file.
-
-        Called at settlement time (Phase B) when |alpha| >= event_alpha_threshold.
-        The entry stores a structured summary + a pointer to the full debate
-        trace JSON — never the full process — so prompt injection stays bounded.
-        """
-        if not self._lessons_path:
-            return
-        protected = abs(alpha) >= (self._event_protect_threshold or 0.0)
-        tag = (
-            f"[EVENT | {entry_id} | {trade_date} | {ticker} | {rating} | "
-            f"{self._format_pct(alpha)} | {self._format_pct(raw)}]"
-        )
-        lines = [tag, "", "SUMMARY:", summary, "", f"CONTEXT_POINTER: {context_pointer}"]
-        if fingerprint:
-            lines.append(f"FINGERPRINT: {fingerprint}")
-        lines.append(f"LAST_ACCESSED: never  |  HITS: 0  |  PROTECTED: {'true' if protected else 'false'}")
-        entry = "\n".join(lines) + self._SEPARATOR
-        with open(self._lessons_path, "a", encoding="utf-8") as f:
-            f.write(entry)
-
     # --- Read path (Phase A) ---
 
     def load_entries(self) -> list[dict]:
@@ -126,76 +66,6 @@ class TradingMemoryLog:
     def get_pending_entries(self) -> list[dict]:
         """Return entries with outcome:pending (for Phase B)."""
         return [e for e in self.load_entries() if e.get("pending")]
-
-    # --- Lessons read path (L1 events / L3 rules) ---
-
-    def load_lessons(self) -> list[dict]:
-        """Parse all entries from the lessons file (EVENT entries for now)."""
-        if not self._lessons_path or not self._lessons_path.exists():
-            return []
-        text = self._lessons_path.read_text(encoding="utf-8")
-        raw_entries = [e.strip() for e in text.split(self._SEPARATOR) if e.strip()]
-        entries = []
-        for raw in raw_entries:
-            parsed = self._parse_lessons_entry(raw)
-            if parsed:
-                entries.append(parsed)
-        return entries
-
-    def _parse_lessons_entry(self, raw: str) -> dict | None:
-        """Parse one EVENT entry. Non-EVENT tags (RULE, decision) return None for now."""
-        lines = raw.strip().splitlines()
-        if not lines:
-            return None
-        tag = lines[0].strip()
-        if not (tag.startswith("[EVENT") and tag.endswith("]")):
-            return None
-        fields = [f.strip() for f in tag[1:-1].split("|")]
-        if len(fields) < 7:
-            return None
-        entry = {
-            "kind": fields[0],
-            "entry_id": fields[1],
-            "trade_date": fields[2],
-            "ticker": fields[3],
-            "rating": fields[4],
-            "alpha": self._parse_pct(fields[5]),
-            "raw": self._parse_pct(fields[6]),
-            "summary": "",
-            "context_pointer": "",
-            "fingerprint": "",
-            "last_accessed": "never",
-            "hits": 0,
-            "protected": False,
-        }
-        current = None
-        for line in lines[1:]:
-            if line.startswith("SUMMARY:"):
-                current = "summary"
-                entry["summary"] = line[len("SUMMARY:"):].strip()
-            elif line.startswith("CONTEXT_POINTER:"):
-                current = None
-                entry["context_pointer"] = line[len("CONTEXT_POINTER:"):].strip()
-            elif line.startswith("FINGERPRINT:"):
-                current = None
-                entry["fingerprint"] = line[len("FINGERPRINT:"):].strip()
-            elif line.startswith("LAST_ACCESSED:"):
-                current = None
-                meta = line[len("LAST_ACCESSED:"):].strip()
-                entry["last_accessed"] = meta.split("|")[0].strip()
-                for part in meta.split("|"):
-                    part = part.strip()
-                    if part.startswith("HITS:"):
-                        try:
-                            entry["hits"] = int(part.split(":", 1)[1].strip())
-                        except ValueError:
-                            entry["hits"] = 0
-                    elif part.startswith("PROTECTED:"):
-                        entry["protected"] = part.split(":", 1)[1].strip().lower() == "true"
-            elif current == "summary":
-                if line.strip():
-                    entry["summary"] = entry["summary"] + "\n" + line if entry["summary"] else line
-        return entry
 
     def get_past_context(self, ticker: str, n_same: int = 5, n_cross: int = 3) -> str:
         """Return formatted past context string for agent prompt injection."""

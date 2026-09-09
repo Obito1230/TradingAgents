@@ -25,6 +25,13 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_GOOGLE_THINKING_LEVEL":   "google_thinking_level",
     "TRADINGAGENTS_OPENAI_REASONING_EFFORT": "openai_reasoning_effort",
     "TRADINGAGENTS_ANTHROPIC_EFFORT":        "anthropic_effort",
+    # Three-layer memory (L1 events / L3 rules)
+    "TRADINGAGENTS_EVENT_ALPHA_THRESHOLD":   "event_alpha_threshold",
+    "TRADINGAGENTS_EVENT_PROTECT_THRESHOLD": "event_protect_threshold",
+    "TRADINGAGENTS_MAX_EVENT_ENTRIES":       "max_event_entries",
+    "TRADINGAGENTS_MAX_RULE_ENTRIES":        "max_rule_entries",
+    "TRADINGAGENTS_DISTILL_INTERVAL_DAYS":   "distill_interval_days",
+    "TRADINGAGENTS_POSTMORTEM_LLM":          "postmortem_llm",
 }
 
 
@@ -77,6 +84,20 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # the oldest resolved entries are pruned once this limit is exceeded.
     # Pending entries are never pruned. None disables rotation entirely.
     "memory_log_max_entries": None,
+    # Three-layer memory: L1 events + L3 rules live in a separate lessons file.
+    # lessons_path mirrors memory_log_path's os.getenv pattern (string key).
+    "lessons_path": os.getenv("TRADINGAGENTS_LESSONS_PATH", os.path.join(_TRADINGAGENTS_HOME, "memory", "trading_lessons.md")),
+    # |alpha| >= event_alpha_threshold at settlement triggers the postmortem
+    # agent to write an L1 event; |alpha| >= event_protect_threshold marks the
+    # event protected from routine eviction. v2 uses max_rule_entries and
+    # distill_interval_days for the L3 distillation loop.
+    "event_alpha_threshold": 0.05,
+    "event_protect_threshold": 0.10,
+    "max_event_entries": 200,
+    "max_rule_entries": 50,
+    "distill_interval_days": 90,
+    # Which LLM tier the postmortem/distillation agent uses: "deep" or "quick".
+    "postmortem_llm": "deep",
     # LLM settings
     "llm_provider": "openai",
     "deep_think_llm": "gpt-5.5",
