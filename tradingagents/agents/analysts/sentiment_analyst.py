@@ -34,6 +34,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
     get_news,
+    is_source_disabled,
 )
 from tradingagents.agents.utils.structured import (
     NO_EXTERNAL_TOOLS,
@@ -68,8 +69,16 @@ def create_sentiment_analyst(llm):
         # returns a string (no exceptions surface from here), so the LLM
         # always sees something — either real data or a clear placeholder.
         news_block = get_news.func(ticker, start_date, end_date)
-        stocktwits_block = fetch_stocktwits_messages(ticker, limit=30)
-        reddit_block = fetch_reddit_posts(ticker)
+        if is_source_disabled("social"):
+            # Declared restriction (config['disabled_sources']): skip the network
+            # calls entirely and say so, so the model flags the reduced input
+            # surface instead of reporting it as a transient data gap.
+            stocktwits_block = reddit_block = (
+                "<disabled: social sources are disabled for this experiment>"
+            )
+        else:
+            stocktwits_block = fetch_stocktwits_messages(ticker, limit=30)
+            reddit_block = fetch_reddit_posts(ticker)
 
         system_message = _build_system_message(
             ticker=ticker,

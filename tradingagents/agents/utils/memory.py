@@ -1,6 +1,7 @@
 """Append-only markdown decision log for TradingAgents."""
 
 import re
+from datetime import datetime
 from pathlib import Path
 
 from tradingagents.agents.utils.rating import parse_rating
@@ -34,6 +35,14 @@ class TradingMemoryLog:
             self._lessons_path.parent.mkdir(parents=True, exist_ok=True)
         self._max_event_entries = cfg.get("max_event_entries")
         self._event_protect_threshold = cfg.get("event_protect_threshold")
+        self._min_per_direction = cfg.get("min_events_per_direction")
+
+        # Evicted events are buffered here for the L3 distillation loop.
+        self._distill_queue_path = None
+        queue = cfg.get("distill_queue_path")
+        if queue:
+            self._distill_queue_path = Path(queue).expanduser()
+            self._distill_queue_path.parent.mkdir(parents=True, exist_ok=True)
 
     # --- Write path (Phase A) ---
 
@@ -61,7 +70,9 @@ class TradingMemoryLog:
     # --- Lessons write path (L1 events) ---
 
     @staticmethod
-    def _format_pct(value: float) -> str:
+    def _format_pct(value):
+        if value is None:
+            return "n/a"
         return f"{value:+.1%}"
 
     @staticmethod
@@ -196,6 +207,201 @@ class TradingMemoryLog:
                 if line.strip():
                     entry["summary"] = entry["summary"] + "\n" + line if entry["summary"] else line
         return entry
+
+    def _render_event_entry(self, e: dict) -> str:
+        """Serialize a parsed EVENT entry back to its markdown block."""
+        tag = (
+            f"[EVENT | {e['entry_id']} | {e['trade_date']} | {e['ticker']} | "
+            f"{e['rating']} | {self._format_pct(e['alpha'])} | {self._format_pct(e['raw'])}]"
+        )
+        lines = [tag, "", "SUMMARY:", e["summary"], "", f"CONTEXT_POINTER: {e['context_pointer']}"]
+        if e.get("fingerprint"):
+            lines.append(f"FINGERPRINT: {e['fingerprint']}")
+        lines.append(
+            f"LAST_ACCESSED: {e.get('last_accessed', 'never')}  |  "
+            f"HITS: {e.get('hits', 0)}  |  PROTECTED: {'true' if e.get('protected') else 'false'}"
+        )
+        return "\n".join(lines)
+
+    def _rewrite_lessons(self, entries: list[dict]) -> None:
+        """Atomically rewrite the lessons file from parsed entries.
+
+        Keeps a trailing separator so a later store_event() append stays a
+        separate block (matching the decision-log convention).
+        """
+        if not self._lessons_path or not entries:
+            return
+        text = self._SEPARATOR.join(self._render_event_entry(e) for e in entries) + self._SEPARATOR
+        tmp_path = self._lessons_path.with_suffix(".tmp")
+        tmp_path.write_text(text, encoding="utf-8")
+        tmp_path.replace(self._lessons_path)
+
+    def _format_event(self, e: dict) -> str:
+        """Compact injection format for one EVENT entry (no full process)."""
+        return (
+            f"[{e['trade_date']} | {e['ticker']} | {e['rating']} | "
+            f"{self._format_pct(e['alpha'])}]\n{e['summary']}"
+        )
+
+    def get_lessons_context(self, ticker: str, n_same: int = 5, n_cross: int = 3) -> str:
+        """Return L1 event context for injection, and bump access metadata.
+
+        Retrieval is recency-first with a per-direction floor: at least
+        min_events_per_direction win AND loss events are surfaced, so a long
+        winning streak can't crowd out the last bear-market lessons. Selected
+        entries have hits / last_accessed rewritten back to disk (one small
+        atomic write per run — negligible at a few hundred entries).
+        """
+        entries = self.load_lessons()
+        if not entries:
+            return ""
+
+        floor = self._min_per_direction or 0
+        same = sorted([e for e in entries if e["ticker"] == ticker],
+                      key=lambda e: e.get("trade_date", ""), reverse=True)
+        cross = sorted([e for e in entries if e["ticker"] != ticker],
+                       key=lambda e: e.get("trade_date", ""), reverse=True)
+        same = self._select_direction_balanced(same, n_same, floor)
+        cross = self._select_direction_balanced(cross, n_cross, floor)
+        selected_ids = {e["entry_id"] for e in same + cross}
+
+        now = datetime.now().strftime("%Y-%m-%d")
+        for e in entries:
+            if e["entry_id"] in selected_ids:
+                e["hits"] = e.get("hits", 0) + 1
+                e["last_accessed"] = now
+        self._rewrite_lessons(entries)
+
+        parts = []
+        if same:
+            parts.append(f"Past extreme events for {ticker} (most recent first):")
+            parts.extend(self._format_event(e) for e in same)
+        if cross:
+            parts.append("Recent cross-ticker extreme events:")
+            parts.extend(self._format_event(e) for e in cross)
+        return "\n\n".join(parts)
+
+    def get_rules_context(self) -> str:
+        """Return distilled team rules as a prompt preamble. v1: no rules yet."""
+        return ""
+
+    # --- Lessons maintenance (simplified forgetting) ---
+
+    @staticmethod
+    def _sign(alpha):
+        """Direction of an event: 'win' / 'loss' / None (unknown)."""
+        if alpha is None:
+            return None
+        return "win" if alpha >= 0 else "loss"
+
+    def _recency_key(self, e):
+        """Keep-priority key: most-recently-used first, newest trade_date, most hits."""
+        last = e.get("last_accessed", "never")
+        has_access = 0 if last == "never" else 1
+        return (has_access, last if has_access else "", e.get("trade_date", ""), e.get("hits", 0))
+
+    def _select_direction_balanced(self, events, n, floor):
+        """Newest-first selection guaranteeing >= floor per outcome direction."""
+        if floor <= 0 or not events:
+            return events[:n]
+        wins = [e for e in events if self._sign(e.get("alpha")) == "win"]
+        losses = [e for e in events if self._sign(e.get("alpha")) == "loss"]
+        picked, ids = [], set()
+        for pool in (wins, losses):
+            for e in pool[:floor]:
+                picked.append(e)
+                ids.add(e["entry_id"])
+        if len(picked) < n:
+            for e in events:
+                if e["entry_id"] not in ids:
+                    picked.append(e)
+                    ids.add(e["entry_id"])
+                    if len(picked) >= n:
+                        break
+        return picked
+
+    def _dedupe_events(self, entries):
+        """Remove literal duplicates (same ticker+trade_date+rating).
+
+        Semantic redundancy (same *situation* within a window) is deferred to
+        v3: without the state fingerprint, a 30-day window chains and over-merges
+        whole streaks into one entry — exactly the bear-memory loss we must avoid.
+        """
+        seen = set()
+        kept, removed = [], []
+        for e in entries:
+            key = (e["ticker"], e["trade_date"], e["rating"])
+            if key in seen:
+                removed.append(e)
+            else:
+                seen.add(key)
+                kept.append(e)
+        return kept, removed
+
+    def _evict_to_cap(self, entries):
+        """Drop lowest-value non-protected entries down to the cap.
+
+        Returns (kept, evicted). Protected entries and the per-direction floor
+        are never evicted, so a long bull can't erase the last bear lessons.
+        """
+        max_entries = self._max_event_entries
+        if not max_entries or len(entries) <= max_entries:
+            return entries, []
+        floor = self._min_per_direction or 0
+        protected = [e for e in entries if e.get("protected")]
+        unprotected = [e for e in entries if not e.get("protected")]
+        unprotected.sort(key=self._recency_key, reverse=True)
+
+        wins = [e for e in unprotected if self._sign(e.get("alpha")) == "win"]
+        losses = [e for e in unprotected if self._sign(e.get("alpha")) == "loss"]
+
+        budget = max(0, max_entries - len(protected))
+        kept, kept_ids = [], set()
+        # floor: reserve the highest-priority entries of each direction
+        for pool in (wins, losses):
+            for e in pool[:floor]:
+                kept.append(e)
+                kept_ids.add(e["entry_id"])
+        # fill remaining budget with highest-priority leftovers
+        for e in unprotected:
+            if len(kept) >= budget:
+                break
+            if e["entry_id"] not in kept_ids:
+                kept.append(e)
+                kept_ids.add(e["entry_id"])
+        dropped = [e for e in unprotected if e["entry_id"] not in kept_ids]
+        return protected + kept, dropped
+
+    def _append_distill_queue(self, entries):
+        """Buffer evicted entries for the L3 distillation loop (not hard-deleted)."""
+        if not self._distill_queue_path or not entries:
+            return
+        text = self._SEPARATOR.join(self._render_event_entry(e) for e in entries) + self._SEPARATOR
+        with open(self._distill_queue_path, "a", encoding="utf-8") as f:
+            f.write(text)
+
+    def maintain_memory(self) -> None:
+        """Simplify the lessons store without losing information.
+
+        Redundant entries are merged; over-cap entries are evicted — but evicted
+        (and merged-out) entries are buffered to the distill queue for L3, and
+        the per-direction floor keeps both big wins and big losses represented.
+        """
+        if not self._lessons_path or not self._lessons_path.exists():
+            return
+        entries = self.load_lessons()
+        if not entries:
+            return
+        entries, deduped = self._dedupe_events(entries)
+        entries, evicted = self._evict_to_cap(entries)
+        queued = deduped + evicted
+        if queued:
+            self._append_distill_queue(queued)
+        entries.sort(key=lambda e: e.get("trade_date", ""))  # keep chronological
+        if entries:
+            self._rewrite_lessons(entries)
+        else:
+            self._lessons_path.write_text("", encoding="utf-8")
 
     def get_past_context(self, ticker: str, n_same: int = 5, n_cross: int = 3) -> str:
         """Return formatted past context string for agent prompt injection."""

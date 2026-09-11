@@ -44,16 +44,20 @@ def test_load_ohlcv_requests_inclusive_end(monkeypatch, tmp_path):
     set_config({"data_cache_dir": str(tmp_path)})
     captured = {}
 
-    def fake_download(symbol, start, end, **kwargs):
-        captured["end"] = end
-        idx = pd.to_datetime([pd.Timestamp.today().normalize()])
-        return pd.DataFrame(
-            {"Open": [100.0], "High": [100.0], "Low": [100.0],
-             "Close": [100.0], "Volume": [1]},
-            index=idx,
-        )
+    class FakeTicker:
+        def __init__(self, symbol):
+            pass
 
-    monkeypatch.setattr(su.yf, "download", fake_download)
+        def history(self, start, end, **kwargs):
+            captured["end"] = end
+            idx = pd.to_datetime([pd.Timestamp.today().normalize()])
+            return pd.DataFrame(
+                {"Open": [100.0], "High": [100.0], "Low": [100.0],
+                 "Close": [100.0], "Volume": [1]},
+                index=idx,
+            )
+
+    monkeypatch.setattr(su.yf, "Ticker", FakeTicker)
     today = pd.Timestamp.today().strftime("%Y-%m-%d")
     su.load_ohlcv("AAPL", today)
 

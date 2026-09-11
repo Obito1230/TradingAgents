@@ -43,6 +43,7 @@ __all__ = [
     "resolve_instrument_identity",
     "get_instrument_context_from_state",
     "get_language_instruction",
+    "is_source_disabled",
     "create_msg_delete",
 ]
 
@@ -63,6 +64,23 @@ def get_language_instruction() -> str:
     if lang.strip().lower() == "english":
         return ""
     return f" Write your entire response in {lang}."
+
+
+def is_source_disabled(name: str) -> bool:
+    """Whether an external data source was disabled for this run.
+
+    Reads ``config['disabled_sources']`` (env: ``TRADINGAGENTS_DISABLED_SOURCES``,
+    comma-separated). Used to hold the input surface constant across experiment
+    arms when a source is unusable (e.g. A-share runs have no usable
+    social/macro/prediction-market data), instead of letting it fail
+    nondeterministically in one arm only.
+    """
+    from tradingagents.dataflows.config import get_config
+
+    disabled = get_config().get("disabled_sources") or []
+    if isinstance(disabled, str):
+        disabled = [part.strip() for part in disabled.split(",")]
+    return name.strip().lower() in {str(item).strip().lower() for item in disabled}
 
 
 def _clean_identity_value(value: Any) -> str | None:

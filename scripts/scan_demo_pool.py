@@ -160,7 +160,8 @@ def main() -> int:
     table = pd.DataFrame(records)[headers]
     print(table.to_string(index=False))
     print(f"\n{len(records)} candidate(s); top by |realized move|. "
-          f"trade_date must stay >= ~{dt.date.today() - dt.timedelta(days=35)} for L1 settlement demo.")
+          f"Latest usable trade_date is ~{dt.date.today() - dt.timedelta(days=35)} "
+          f"(i.e. at least 35 days in the past) for the L1 settlement demo.")
 
     if args.csv:
         table.to_csv(args.csv, index=False)

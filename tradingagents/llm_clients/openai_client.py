@@ -1,5 +1,7 @@
+import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -11,6 +13,38 @@ from .api_key_env import get_api_key_env
 from .base_client import BaseLLMClient, normalize_content
 from .capabilities import get_capabilities
 from .validators import validate_model
+
+logger = logging.getLogger(__name__)
+
+# Providers with server-side content moderation (Zhipu GLM/BigModel most
+# notably) can reject a *generated* response with HTTP 400 + a contentFilter
+# payload (Zhipu error code 1301) instead of returning text. Left alone, one
+# flagged generation aborts a multi-minute analysis run, so retry a few times
+# before surfacing the error. TRADINGAGENTS_MODERATION_RETRIES=0 disables it.
+MODERATION_MAX_RETRIES = 2
+MODERATION_RETRY_DELAY_SECONDS = 1.0
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using %s", name, raw, default)
+        return default
+
+
+def is_moderation_error(exc: BaseException) -> bool:
+    """True when a provider's content-moderation filter rejected the response.
+
+    Matches the Zhipu ``contentFilter`` payload / error code 1301 returned by
+    GLM in both regions. Other providers never match, so the retry stays
+    dormant for them.
+    """
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return "contentfilter" in text or ("1301" in text and "400" in text)
 
 
 class NormalizedChatOpenAI(ChatOpenAI):
@@ -33,7 +67,24 @@ class NormalizedChatOpenAI(ChatOpenAI):
     """
 
     def invoke(self, input, config=None, **kwargs):
-        return normalize_content(super().invoke(input, config, **kwargs))
+        max_retries = max(0, int(_env_float("TRADINGAGENTS_MODERATION_RETRIES", MODERATION_MAX_RETRIES)))
+        delay = max(0.0, _env_float("TRADINGAGENTS_MODERATION_RETRY_DELAY", MODERATION_RETRY_DELAY_SECONDS))
+        attempt = 0
+        while True:
+            try:
+                return normalize_content(super().invoke(input, config, **kwargs))
+            except Exception as exc:  # noqa: BLE001 — re-raised unless moderation
+                if attempt >= max_retries or not is_moderation_error(exc):
+                    raise
+                attempt += 1
+                wait = delay * attempt
+                logger.warning(
+                    "Provider content moderation rejected the response for %s "
+                    "(attempt %d/%d); retrying in %.1fs",
+                    self.model_name, attempt, max_retries, wait,
+                )
+                if wait:
+                    time.sleep(wait)
 
     def with_structured_output(self, schema, *, method=None, **kwargs):
         caps = get_capabilities(self.model_name)

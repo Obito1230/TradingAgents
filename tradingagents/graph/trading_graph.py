@@ -25,9 +25,11 @@ from tradingagents.agents.utils.agent_utils import (
     get_prediction_markets,
     get_stock_data,
     get_verified_market_snapshot,
+    is_source_disabled,
     resolve_instrument_identity,
 )
 from tradingagents.agents.utils.memory import TradingMemoryLog
+from tradingagents.agents.utils.postmortem_agent import create_postmortem_agent
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.utils import safe_ticker_component
 from tradingagents.default_config import DEFAULT_CONFIG
@@ -114,6 +116,13 @@ class TradingAgentsGraph:
         self.deep_thinking_llm = deep_client.get_llm()
         self.quick_thinking_llm = quick_client.get_llm()
 
+        # Postmortem agent runs at settlement (Phase B) for extreme |alpha|; it
+        # defaults to the deep tier but can be switched to quick via config.
+        postmortem_client = (
+            deep_client if self.config.get("postmortem_llm", "deep") == "deep" else quick_client
+        )
+        self.postmortem_agent = create_postmortem_agent(postmortem_client.get_llm())
+
         self.memory_log = TradingMemoryLog(self.config)
 
         # Create tool nodes
@@ -187,6 +196,14 @@ class TradingAgentsGraph:
 
     def _create_tool_nodes(self) -> dict[str, ToolNode]:
         """Create tool nodes for different data sources using abstract methods."""
+        # Sources disabled for this run are dropped from the node entirely, so a
+        # model can never call them (and no time is wasted on unreachable APIs).
+        news_tools = [get_news, get_global_news, get_insider_transactions]
+        if not is_source_disabled("macro"):
+            news_tools.append(get_macro_indicators)
+        if not is_source_disabled("prediction_markets"):
+            news_tools.append(get_prediction_markets)
+
         return {
             "market": ToolNode(
                 [
@@ -206,16 +223,7 @@ class TradingAgentsGraph:
                     get_news,
                 ]
             ),
-            "news": ToolNode(
-                [
-                    # News and insider information
-                    get_news,
-                    get_global_news,
-                    get_insider_transactions,
-                    get_macro_indicators,
-                    get_prediction_markets,
-                ]
-            ),
+            "news": ToolNode(news_tools),
             "fundamentals": ToolNode(
                 [
                     # Fundamental analysis tools
@@ -293,6 +301,66 @@ class TradingAgentsGraph:
             )
             return None, None, None
 
+    def _full_state_path(self, ticker: str, trade_date: str) -> Path:
+        """Path to the on-disk full-state JSON written by _log_state()."""
+        directory = (
+            Path(self.config["results_dir"])
+            / safe_ticker_component(ticker)
+            / "TradingAgentsStrategy_logs"
+        )
+        return directory / f"full_states_log_{trade_date}.json"
+
+    def _maybe_write_event(self, entry, ticker, raw, alpha, days, benchmark) -> None:
+        """Write an L1 EVENT entry when a settlement is extreme enough.
+
+        Fires only when |alpha| >= event_alpha_threshold. Loads the full-state
+        JSON (analyst reports + debate histories) so the postmortem agent can
+        attribute the outcome to what the team actually argued, then stores a
+        compact structured summary pointing back at that JSON.
+        """
+        threshold = self.config.get("event_alpha_threshold", 0.05)
+        if abs(alpha) < threshold:
+            return
+
+        state_path = self._full_state_path(ticker, entry["date"])
+        state: dict[str, Any] = {}
+        if state_path.exists():
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.warning("Could not load full state for postmortem %s: %s", state_path, exc)
+
+        decision = entry.get("decision", "") or state.get("final_trade_decision", "")
+        try:
+            summary = self.postmortem_agent(
+                state, decision, raw, alpha, benchmark_name=benchmark,
+            )
+        except Exception as exc:  # noqa: BLE001 — never lose the extreme event
+            # Provider-side moderation (e.g. GLM error 1301) or any other
+            # generation failure must not drop the event: the settled numbers,
+            # the pointer to the full debate trace, and the protected flag are
+            # the parts that matter most. Store a placeholder narrative instead.
+            logger.warning(
+                "Postmortem generation failed for %s@%s (%s); storing the event "
+                "with a placeholder summary", ticker, entry["date"], exc,
+            )
+            summary = (
+                f"**Decision Summary**: {(decision or '(unavailable)')[:400]}\n"
+                f"**Postmortem narrative**: unavailable — generation failed "
+                f"({type(exc).__name__}). The settled outcome and the full debate "
+                f"trace pointer are still recorded."
+            )
+        self.memory_log.store_event(
+            entry_id=f"E-{entry['date']}-{ticker}",
+            ticker=ticker,
+            trade_date=entry["date"],
+            rating=entry.get("rating", ""),
+            alpha=alpha,
+            raw=raw,
+            summary=summary,
+            context_pointer=str(state_path),
+        )
+
     def _resolve_pending_entries(self, ticker: str) -> None:
         """Resolve pending log entries for ticker at the start of a new run.
 
@@ -321,6 +389,7 @@ class TradingAgentsGraph:
                 alpha_return=alpha,
                 benchmark_name=benchmark,
             )
+            self._maybe_write_event(entry, ticker, raw, alpha, days, benchmark)
             updates.append({
                 "ticker": ticker,
                 "trade_date": entry["date"],
@@ -332,6 +401,7 @@ class TradingAgentsGraph:
 
         if updates:
             self.memory_log.batch_update_with_outcomes(updates)
+            self.memory_log.maintain_memory()
 
     def resolve_instrument_context(self, ticker: str, asset_type: str = "stock") -> str:
         """Resolve ticker identity once and return the full instrument context.
@@ -416,11 +486,25 @@ class TradingAgentsGraph:
             )
         return write_report_tree(final_state, ticker, save_path)
 
+    def _build_past_context(self, ticker: str) -> str:
+        """Compose the past-context string injected into the Portfolio Manager.
+
+        Three segments, empty ones dropped: distilled team rules (L3 preamble),
+        L1 event summaries (recency top-k), then the legacy decision-log
+        reflections as fallback during migration.
+        """
+        parts = [
+            self.memory_log.get_rules_context(),
+            self.memory_log.get_lessons_context(ticker),
+            self.memory_log.get_past_context(ticker),
+        ]
+        return "\n\n".join(p for p in parts if p)
+
     def _run_graph(self, company_name, trade_date, asset_type: str = "stock"):
         """Execute the graph and write the resulting state to disk and memory log."""
         # Initialize state — inject memory log context for PM and the
         # deterministically resolved instrument identity for all agents.
-        past_context = self.memory_log.get_past_context(company_name)
+        past_context = self._build_past_context(company_name)
         instrument_context = self.resolve_instrument_context(company_name, asset_type)
         init_agent_state = self.propagator.create_initial_state(
             company_name,

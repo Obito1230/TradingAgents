@@ -157,13 +157,25 @@ def measure_run(
     trade_date: str,
     asset_type: str = "stock",
     config: dict[str, Any] | None = None,
+    selected_analysts: list[str] | None = None,
+    debug: bool = False,
 ) -> tuple[dict[str, Any], str, dict[str, Any]]:
-    """Run one propagate() under cost tracking; returns (state, decision, stats)."""
+    """Run one propagate() under cost tracking; returns (state, decision, stats).
+
+    ``selected_analysts`` restricts the analyst team (e.g. drop "news" for
+    A-share runs or to shrink the prompt surface); None keeps the framework
+    default (market, social, news, fundamentals). ``debug`` streams node-level
+    output so a long run shows progress.
+    """
     handler = CostTrackingHandler()
+    graph_kwargs: dict[str, Any] = {}
+    if selected_analysts:
+        graph_kwargs["selected_analysts"] = tuple(selected_analysts)
     ta = TradingAgentsGraph(
-        debug=False,
+        debug=debug,
         config=config if config is not None else DEFAULT_CONFIG.copy(),
         callbacks=[handler],
+        **graph_kwargs,
     )
 
     # Propagate callbacks into the graph invocation too, so tool calls are

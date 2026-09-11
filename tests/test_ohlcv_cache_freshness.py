@@ -77,13 +77,20 @@ def test_load_ohlcv_refetches_stale_same_day_cache(tmp_path, monkeypatch):
 
     calls = []
 
-    def _fake_download(*a, **k):
-        calls.append(1)
-        return pd.DataFrame(
-            {"Date": pd.to_datetime(["2026-07-17", "2026-07-18"]), "Close": [100.0, 222.0]}
-        ).set_index("Date")
+    class _FakeTicker:
+        def __init__(self, symbol):
+            pass
 
-    monkeypatch.setattr(su.yf, "download", _fake_download)
+        def history(self, start, end, **kwargs):
+            calls.append(1)
+            idx = pd.to_datetime(["2026-07-17", "2026-07-18"])
+            return pd.DataFrame({"Close": [100.0, 222.0]}, index=idx)
+
+    def _fail_download(*a, **k):
+        raise AssertionError("Ticker.history succeeded; yf.download must not be used")
+
+    monkeypatch.setattr(su.yf, "Ticker", _FakeTicker)
+    monkeypatch.setattr(su.yf, "download", _fail_download)
 
     out = su.load_ohlcv("AAPL", TODAY.strftime("%Y-%m-%d"))
 
@@ -105,5 +112,10 @@ def test_load_ohlcv_reuses_fresh_same_day_cache(tmp_path, monkeypatch):
     def _fail_download(*a, **k):
         raise AssertionError("fresh cache must not refetch")
 
+    class _FailTicker:
+        def __init__(self, symbol):
+            raise AssertionError("fresh cache must not refetch")
+
     monkeypatch.setattr(su.yf, "download", _fail_download)
+    monkeypatch.setattr(su.yf, "Ticker", _FailTicker)
     su.load_ohlcv("AAPL", TODAY.strftime("%Y-%m-%d"))

@@ -35,7 +35,7 @@ def create_portfolio_manager(llm):
 
         past_context = state.get("past_context", "")
         lessons_line = (
-            f"- Lessons from prior decisions and outcomes:\n{past_context}\n"
+            f"- Team memory:\n{past_context}\n"
             if past_context
             else ""
         )

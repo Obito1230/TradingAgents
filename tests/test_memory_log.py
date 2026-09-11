@@ -693,7 +693,7 @@ class TestPortfolioManagerInjection:
         pm_node = create_portfolio_manager(llm)
         state = _make_pm_state(past_context="[2026-01-05 | NVDA | Buy | +5.0% | +2.0% | 5d]\nGreat call.")
         pm_node(state)
-        assert "Lessons from prior decisions and outcomes" in captured["prompt"]
+        assert "Team memory" in captured["prompt"]
         assert "Great call." in captured["prompt"]
 
     def test_pm_no_past_context_no_section(self):

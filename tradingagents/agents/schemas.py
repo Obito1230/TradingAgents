@@ -339,3 +339,49 @@ def render_sentiment_report(report: SentimentReport) -> str:
         "",
         report.narrative,
     ])
+
+
+# ---------------------------------------------------------------------------
+# L1 Postmortem Agent
+# ---------------------------------------------------------------------------
+
+
+class EventPostmortem(BaseModel):
+    """Structured post-mortem produced for an extreme settlement outcome.
+
+    Fired only when |alpha| >= event_alpha_threshold at settlement (Phase B).
+    The agent reads the full multi-agent debate trace (analyst reports + bull/bear
+    + risk debate + trader plan + final decision) plus the realized outcome, and
+    distils *why* the outcome happened into a compact, reusable summary. Field
+    descriptions double as the model's output instructions.
+    """
+
+    decision_summary: str = Field(
+        description="What the team decided and why, in 1-2 sentences.",
+    )
+    key_basis: str = Field(
+        description="The concrete evidence the team anchored the decision on "
+        "(cite the specific report or debate claim).",
+    )
+    missed_factors: str = Field(
+        description="Factors the team underweighted or did not see that mattered "
+        "to the realized outcome.",
+    )
+    transferable_lesson: str = Field(
+        description="One concrete, reusable lesson for the next similar analysis.",
+    )
+    self_critique: str = Field(
+        description="A candid flaw in the team's reasoning that a future run "
+        "should avoid repeating.",
+    )
+
+
+def render_event_postmortem(postmortem: EventPostmortem) -> str:
+    """Render an EventPostmortem to the markdown stored in the lessons file."""
+    return "\n".join([
+        f"**Decision Summary**: {postmortem.decision_summary}",
+        f"**Key Basis**: {postmortem.key_basis}",
+        f"**Missed Factors**: {postmortem.missed_factors}",
+        f"**Transferable Lesson**: {postmortem.transferable_lesson}",
+        f"**Self-critique**: {postmortem.self_critique}",
+    ])

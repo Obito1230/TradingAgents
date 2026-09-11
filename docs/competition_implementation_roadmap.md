@@ -220,3 +220,48 @@
 **汇报节奏(写进日历)**:W4 末(复盘闭环 Demo)→ W6 末(全流程 Demo)→ W8(验收)。每次只演示"能跑的东西 + 下一步计划",不要带半成品细节。
 
 **验收会口径**:开场 30 秒讲"现状缺陷 → 我的架构解决 → 证据";演示默认场景 → 展示记忆写入/注入/对比;最后给局限与未来(L2/L3)。机制名词归因纪律见 `positioning_and_related_work.md` §3.3。
+
+---
+
+## 7. W2–W3:L1 后端实施计划(步骤 5–7)
+
+> 承接 §6 的 v1 范围。**已完成的步骤**(见 `docs/v1_implementation_guide.md`):1 配置项、2 lessons 存储骨架、3 复盘 agent、4 结算挂钩;128 测试全绿。W2–W3 完成剩余 **步骤 5(注入)、6(维护)、7(集成)**,把 L1 从"写"推进到"写→取→维护"全链路,并在 W4 用真实模型跑出 Demo 1。
+
+### 7.1 范围(进 / 不进)
+
+**进(W2–W3)**:
+- **步骤 5 注入改造**:`memory.py` 新增 `get_lessons_context`(L3 准则 preamble 占位 + L1 事件 recency top-k 紧凑格式)+ 访问追踪回写;`trading_graph.py::_run_graph` 的 `past_context` 改为"准则 + 事件 + 决策日志兜底"三段合并;`portfolio_manager.py` 标签可选改为"团队记忆"。
+- **步骤 6 维护**:`memory.py` 新增 `maintain_memory`(上限淘汰 + 保护集 + 冗余剔除 v1 简化版),挂在 `_resolve_pending_entries` 尾部。
+- **步骤 7 集成(你本机跑,需 LLM key)**:`run_pool.py` 跑真实 quick 档,验证"pending → 结算 → 复盘 → 写 lessons"全链路 + `cost_log.csv` 记账;产出 Demo 1 剧本。
+
+**不进(仍后置)**:L2 状态检索(仅留 fingerprint 占位)、L3 蒸馏、完整消融、仪表盘(W5–W6)。
+
+### 7.2 周表
+
+| 周 | 内容 | 完成标志(gate) |
+|---|---|---|
+| W2 | 步骤 5:`get_lessons_context`(准则占位 + 事件 top-k 紧凑格式)+ 访问追踪回写;`_run_graph` 三段合并;PM 标签;单测(格式 / 排序 / hits 回写 / 三段拼接) | 单测绿;`past_context` 能输出"事件摘要 + 旧反思" |
+| W3 | 步骤 6:`maintain_memory`(上限 / 保护集 / 冗余剔除 v1)+ 挂结算尾部;单测(保护集不被淘汰、上限淘汰最旧未用、冗余合并);步骤 7 集成准备(命令清单 + 验收脚本) | 单测绿;全链路离线可测,真实 run 命令就绪 |
+| W4 gate | 真实 quick 档跑通 Demo 1(两跑结算 → 复盘落库 → lessons 文件可见),录 3 分钟 | **Demo 1** |
+
+### 7.3 验收清单(W2–W3 逐项)
+
+- [ ] `get_lessons_context` 返回"准则段(占位空)+ 最近 N 条事件摘要",事件正文不含全量过程(只摘要+指针)
+- [ ] 被注入的事件条目 `hits`/`last_accessed` 回写生效(单测断言)
+- [ ] `_run_graph` 注入内容含事件段 + 旧决策日志反思兜底(准则为空时)
+- [ ] `maintain_memory`:超上限淘汰**最旧未用且非保护**;保护集永不常规淘汰;同 ticker 冗余合并保留 |alpha| 最大者
+- [ ] 新增单测覆盖上述行为;既有 `tests/` 全绿
+- [ ] `run_pool.py --settle` 命令与验收脚本就绪(供 W4 真实跑)
+
+### 7.4 风险与对策
+
+| 风险 | 对策 |
+|---|---|
+| 访问追踪每次 run 回写 lessons 文件(多一次原子写) | 事件数 ≤ 几百,重写成本可忽略;后续若变大再改侧车存储 |
+| 冗余剔除 v1 无 fingerprint,可能误合并不同情境 | 简化规则(同 ticker + 同评级 + 近邻日期)保守起见;fingerprint 进 v3 后再精细化 |
+| 注入三段拼接导致 prompt 变长 | 事件段默认 N=5,与现 `n_same=5` 同量级;token 预算由 `cost_log.csv` 监控 |
+| 真实 run 集成需 LLM key/网络 | 由你本机执行;单测打桩覆盖逻辑,`run_pool` 只做命令编排 |
+
+### 7.5 与 W4 Demo 1 衔接
+
+W2–W3 交付后,W4 用 `demo_pool.json` 的 `l1_extreme_win`(MSFT 2026-07-23)跑两遍(analysis + `--settle`),确认 `trading_lessons.md` 出现 EVENT 条目、`cost_log.csv` 有两条记录——这就是 Demo 1 的 3 分钟演示脚本(开场:现状缺陷 → 我们架构 → 现场跑 → 展示 lessons 落库与注入)。

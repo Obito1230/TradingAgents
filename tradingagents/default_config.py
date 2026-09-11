@@ -32,6 +32,10 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MAX_RULE_ENTRIES":        "max_rule_entries",
     "TRADINGAGENTS_DISTILL_INTERVAL_DAYS":   "distill_interval_days",
     "TRADINGAGENTS_POSTMORTEM_LLM":          "postmortem_llm",
+    "TRADINGAGENTS_MIN_EVENTS_PER_DIRECTION": "min_events_per_direction",
+    # External data sources disabled for this run (comma-separated):
+    # social (StockTwits+Reddit), macro (FRED), prediction_markets (Polymarket).
+    "TRADINGAGENTS_DISABLED_SOURCES":        "disabled_sources",
 }
 
 
@@ -55,6 +59,8 @@ def _coerce(value: str, reference):
         raise ValueError(
             f"expected a boolean ({'/'.join(_BOOL_TRUE + _BOOL_FALSE)}), got {value!r}"
         )
+    if isinstance(reference, list):
+        return [part.strip() for part in value.split(",") if part.strip()]
     if isinstance(reference, int) and not isinstance(reference, bool):
         return int(value)
     if isinstance(reference, float):
@@ -98,6 +104,19 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "distill_interval_days": 90,
     # Which LLM tier the postmortem/distillation agent uses: "deep" or "quick".
     "postmortem_llm": "deep",
+    # Evicted L1 events are buffered here for the L3 distillation loop instead
+    # of being hard-deleted (distillation compensates forgetting).
+    "distill_queue_path": os.getenv("TRADINGAGENTS_DISTILL_QUEUE_PATH", os.path.join(_TRADINGAGENTS_HOME, "memory", "trading_distill_queue.md")),
+    # Keep at least this many win AND loss events regardless of recency, so a
+    # long bull run can't evict or bury the last bear-market lessons.
+    "min_events_per_direction": 3,
+    # External sources disabled for this run. Disabling holds the input surface
+    # constant across experiment arms when a source is unusable/unavailable
+    # (e.g. A-share runs) instead of letting it fail nondeterministically in one
+    # arm only. Values: "social" (StockTwits+Reddit), "macro" (FRED),
+    # "prediction_markets" (Polymarket). Empty list = everything enabled.
+    # env: TRADINGAGENTS_DISABLED_SOURCES="social,macro,prediction_markets"
+    "disabled_sources": [],
     # LLM settings
     "llm_provider": "openai",
     "deep_think_llm": "gpt-5.5",

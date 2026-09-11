@@ -60,6 +60,122 @@ def _ensure_date_column(data: pd.DataFrame) -> pd.DataFrame:
     return data
 
 
+# Per-request window for the OHLCV history fetch. A single multi-year request can
+# come back empty on some networks (the wide range is rejected, or the
+# crumb/cookie handshake fails and yfinance logs "possibly delisted"), so the
+# 5-year history is requested in bounded chunks and concatenated. Set
+# TRADINGAGENTS_OHLCV_CHUNK_DAYS=0 to disable chunking (one wide request).
+OHLCV_CHUNK_DAYS = 365
+
+
+def _chunk_days() -> int:
+    """Resolve the chunk size in days from the environment (0 = no chunking)."""
+    raw = os.environ.get("TRADINGAGENTS_OHLCV_CHUNK_DAYS")
+    if raw is None or raw == "":
+        return OHLCV_CHUNK_DAYS
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logger.warning(
+            "Invalid TRADINGAGENTS_OHLCV_CHUNK_DAYS=%r; using %d", raw, OHLCV_CHUNK_DAYS
+        )
+        return OHLCV_CHUNK_DAYS
+
+
+def _fetch_via_history(canonical: str, start_str: str, end_str: str) -> pd.DataFrame:
+    """Fetch via ``Ticker.history`` — the API the OHLCV tool path uses."""
+    hist = yf_retry(lambda: yf.Ticker(canonical).history(
+        start=start_str, end=end_str, auto_adjust=True
+    ))
+    if hist is None or hist.empty:
+        return pd.DataFrame()
+    return _ensure_date_column(hist.reset_index())
+
+
+def _fetch_via_download(canonical: str, start_str: str, end_str: str) -> pd.DataFrame:
+    """Fetch via ``yf.download`` — the fallback path."""
+    downloaded = yf_retry(lambda: yf.download(
+        canonical,
+        start=start_str,
+        end=end_str,
+        multi_level_index=False,
+        progress=False,
+        auto_adjust=True,
+    ))
+    if downloaded is None or downloaded.empty:
+        return pd.DataFrame()
+    return _ensure_date_column(downloaded.reset_index())
+
+
+def _fetch_ohlcv_window(canonical: str, start_str: str, end_str: str) -> pd.DataFrame:
+    """Fetch one window, trying ``Ticker.history`` then ``yf.download``.
+
+    The two yfinance entry points use different request paths; on restricted
+    networks one can return rows while the other returns an empty frame (which
+    yfinance reports as "possibly delisted"). Trying both keeps the indicator
+    fetch working without changing the caller.
+    """
+    for fetch in (_fetch_via_history, _fetch_via_download):
+        try:
+            frame = fetch(canonical, start_str, end_str)
+        except Exception as exc:  # noqa: BLE001 — try the next path
+            logger.warning("%s failed for %s: %s", fetch.__name__, canonical, exc)
+            continue
+        if not frame.empty:
+            return frame
+    return pd.DataFrame()
+
+
+def _fetch_ohlcv_history(
+    canonical: str, start_dt: pd.Timestamp, end_dt: pd.Timestamp
+) -> pd.DataFrame:
+    """Fetch ``[start_dt, end_dt)`` in chunks and concatenate (dedup + sort)."""
+    chunk_days = _chunk_days()
+    if chunk_days <= 0:
+        return _fetch_ohlcv_window(
+            canonical, start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d")
+        )
+
+    windows = []
+    cursor = start_dt
+    while cursor < end_dt:
+        chunk_end = min(cursor + pd.Timedelta(days=chunk_days), end_dt)
+        windows.append((cursor, chunk_end))
+        cursor = chunk_end
+
+    frames: list[pd.DataFrame] = []
+    failed: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    for w_start, w_end in windows:
+        frame = _fetch_ohlcv_window(
+            canonical, w_start.strftime("%Y-%m-%d"), w_end.strftime("%Y-%m-%d")
+        )
+        if frame.empty:
+            failed.append((w_start, w_end))
+        else:
+            frames.append(frame)
+
+    # One extra pass over failed chunks — transient rejections usually clear.
+    for w_start, w_end in failed:
+        frame = _fetch_ohlcv_window(
+            canonical, w_start.strftime("%Y-%m-%d"), w_end.strftime("%Y-%m-%d")
+        )
+        if frame.empty:
+            logger.warning(
+                "OHLCV chunk %s..%s unavailable for %s", w_start.date(), w_end.date(), canonical
+            )
+        else:
+            frames.append(frame)
+
+    if not frames:
+        return pd.DataFrame()
+    merged = pd.concat(frames, ignore_index=True)
+    if "Date" in merged.columns:
+        merged = (
+            merged.drop_duplicates(subset=["Date"]).sort_values("Date").reset_index(drop=True)
+        )
+    return merged
+
+
 def _clean_dataframe(data: pd.DataFrame) -> pd.DataFrame:
     """Normalize a stock DataFrame for stockstats: parse dates, drop invalid rows, fill price gaps."""
     data = _ensure_date_column(data)
@@ -148,9 +264,11 @@ def _needs_same_day_refresh(data_file, curr_date_dt, today_date) -> bool:
 def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     """Fetch OHLCV data with caching, filtered to prevent look-ahead bias.
 
-    Downloads 5 years of data up to today and caches per symbol. On
-    subsequent calls the cache is reused. Rows after curr_date are
-    filtered out so backtests never see future prices.
+    Downloads 5 years of data up to today and caches per symbol. The history is
+    fetched in bounded chunks (``TRADINGAGENTS_OHLCV_CHUNK_DAYS``, default 365;
+    0 disables chunking) because a single wide request can come back empty on
+    restricted networks. On subsequent calls the cache is reused. Rows after
+    curr_date are filtered out so backtests never see future prices.
     """
     # Resolve broker/forex symbols (XAUUSD+ -> GC=F) to Yahoo's convention,
     # then reject values that would escape the cache directory when
@@ -192,15 +310,9 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
             data = cached
 
     if data is None:
-        downloaded = yf_retry(lambda: yf.download(
-            canonical,
-            start=start_str,
-            end=end_str,
-            multi_level_index=False,
-            progress=False,
-            auto_adjust=True,
-        ))
-        downloaded = _ensure_date_column(downloaded.reset_index())
+        downloaded = _fetch_ohlcv_history(
+            canonical, start_date, today_date + pd.Timedelta(days=1)
+        )
         # Only cache real data — never persist an empty frame.
         if downloaded.empty or "Close" not in downloaded.columns:
             raise NoMarketDataError(
