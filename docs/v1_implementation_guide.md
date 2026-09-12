@@ -205,3 +205,25 @@ env 覆盖(带类型强转):`TRADINGAGENTS_EVENT_ALPHA_THRESHOLD`、`TRADINGAGEN
 **原则**:个人 provider / 模型写 `.env`,**不改源码默认值**(源码默认值保持 provider 中立——否则测试会红、可复现性受损)。
 
 **诊断实测(本机网络,`scripts/diagnose_yfinance.py`)**:`Ticker.history`(显式 start/end)对 600519.SS / 300750.SZ / AAPL 的 **1y 与 5y 全部成功**(243 / 1211 / 1254 行);`yf.download` 对其中 2 个标的一律返回空并打印 "possibly delisted";`period="1mo"` 形式时好时坏(框架不使用该形式)。结论:**优先 `Ticker.history` + 显式 start/end 是正确主路径**,`yf.download` 仅作兜底。
+
+---
+
+## 9. 里程碑与打磨清单
+
+### 9.1 里程碑:步骤 7 完成(L1 端到端跑通,实测)
+
+| 环节 | 证据(实测) |
+|---|---|
+| 写入 | `settle_now.py --ticker 300750.SZ` → `status ok`,`EVENT before=0 after=1`,产出 `[EVENT \| E-2026-03-04-300750.SZ \| 2026-03-04 \| 300750.SZ \| Buy \| +13.1% \| +17.1%]`,`PROTECTED: true`(alpha 13.1% ≥ 10%) |
+| 结算联动 | 决策日志该条由 `\| pending]` 变为 `[2026-03-04 \| 300750.SZ \| Buy \| +17.1% \| +13.1% \| 5d]` |
+| 取用/注入 | `show_injection.py` 打印的三段 `past_context`:准则(空)+ L1 事件摘要 + 决策日志兜底(含 DECISION/REFLECTION) |
+| 验收 | `verify_l1.py --expect-settle` → **4/4 checks passed** |
+| 成本 | 完整分析 12 调用 / 152,589 tok / 904s / $0.086;结算+复盘 2 调用 / 27,227 tok / 258s / $0.019 → **一个"决策→结算→落库"周期 ≈ $0.105 / ~19 分钟** |
+| 复盘价值(实证) | 复盘摘要抓到了原管线未发现的缺陷:① "证据的缺席被当成利好证据"(情绪报告已警告过);② 基本面报告"常态化净利 266.7 亿"的口径/算术不一致,且全链条无人复核;③ 主动声明结果偏倚 |
+
+### 9.2 打磨清单(v1.1)
+
+- [ ] **事件摘要过长**:实测单条 SUMMARY ≈ 2,300 字,与设计目标"在保证内容的前提下尽量精简"冲突,直接抬高注入预算(削弱 P4"同等或更低 token 预算"的论据)。建议:① 在 `EventPostmortem` 各字段 description 里加长度约束(如 Summary ≤ 2 句、Key Basis/Missed Factors ≤ 4 条);② `store_event` 加硬上限(超出截断并标注);③ 注入时按事件截断。
+- [ ] **legacy 反思语言不一致**:`Reflector` 的 prompt 未调用 `get_language_instruction()`,因此 `output_language=Chinese` 时,注入内容里 L1 事件是中文、决策日志 REFLECTION 是英文。建议在 `reflection.py` 补上语言指令。
+- [ ] `hits` / `last_accessed` 回写已有实现,但尚无"遗忘是否真的按访问频次生效"的端到端验证(多跑几轮后观察 distill queue)。
+- [ ] 保护集只增不减(L3 未实现前),文件体积会单调增长——v2 蒸馏落地后闭环。

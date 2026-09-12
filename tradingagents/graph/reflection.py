@@ -2,6 +2,8 @@
 
 from typing import Any
 
+from tradingagents.agents.utils.agent_utils import get_language_instruction
+
 
 class Reflector:
     """Handles reflection on trading decisions."""
@@ -9,6 +11,10 @@ class Reflector:
     def __init__(self, quick_thinking_llm: Any):
         """Initialize the reflector with an LLM."""
         self.quick_thinking_llm = quick_thinking_llm
+        # Kept for backwards compatibility / inspection. The prompt actually sent
+        # is rebuilt per call: it embeds the output-language instruction, which
+        # must follow the *current* config rather than whatever was set when this
+        # Reflector was constructed.
         self.log_reflection_prompt = self._get_log_reflection_prompt()
 
     def _get_log_reflection_prompt(self) -> str:
@@ -26,6 +32,9 @@ class Reflector:
             "3. One concrete lesson to apply to the next similar analysis.\n\n"
             "Be specific and terse. Your output will be stored verbatim in a decision log "
             "and re-read by future analysts, so every word must earn its place."
+            # Keep the reflection in the configured output language, so injected
+            # memory does not mix languages (L1 events already follow it).
+            + get_language_instruction()
         )
 
     def reflect_on_final_decision(
@@ -44,7 +53,7 @@ class Reflector:
         callers that haven't been updated to thread the benchmark through.
         """
         messages = [
-            ("system", self.log_reflection_prompt),
+            ("system", self._get_log_reflection_prompt()),
             (
                 "human",
                 (

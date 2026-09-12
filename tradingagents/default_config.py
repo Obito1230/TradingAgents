@@ -36,6 +36,7 @@ _ENV_OVERRIDES = {
     # External data sources disabled for this run (comma-separated):
     # social (StockTwits+Reddit), macro (FRED), prediction_markets (Polymarket).
     "TRADINGAGENTS_DISABLED_SOURCES":        "disabled_sources",
+    "TRADINGAGENTS_EVENT_SUMMARY_MAX_CHARS": "event_summary_max_chars",
 }
 
 
@@ -99,6 +100,10 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # distill_interval_days for the L3 distillation loop.
     "event_alpha_threshold": 0.05,
     "event_protect_threshold": 0.10,
+    # Hard cap on a stored/injected L1 event summary (characters). The postmortem
+    # schema asks for ~900; this bounds it regardless of what the model returns,
+    # because up to n_same summaries are re-injected into every future prompt.
+    "event_summary_max_chars": 1600,
     "max_event_entries": 200,
     "max_rule_entries": 50,
     "distill_interval_days": 90,

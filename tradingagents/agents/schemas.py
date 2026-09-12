@@ -352,27 +352,32 @@ class EventPostmortem(BaseModel):
     Fired only when |alpha| >= event_alpha_threshold at settlement (Phase B).
     The agent reads the full multi-agent debate trace (analyst reports + bull/bear
     + risk debate + trader plan + final decision) plus the realized outcome, and
-    distils *why* the outcome happened into a compact, reusable summary. Field
-    descriptions double as the model's output instructions.
+    distils *why* the outcome happened into a compact, reusable summary.
+
+    Brevity is a hard requirement, not a style preference: this summary is
+    re-injected into future prompts (up to ``n_same`` events per run), so every
+    field carries an explicit budget. Total target <= ~900 characters; the store
+    enforces a hard cap (``event_summary_max_chars``) regardless.
     """
 
     decision_summary: str = Field(
-        description="What the team decided and why, in 1-2 sentences.",
+        description="What the team decided and why. 1-2 sentences, <= 120 characters.",
     )
     key_basis: str = Field(
-        description="The concrete evidence the team anchored the decision on "
-        "(cite the specific report or debate claim).",
+        description="The evidence the decision rested on: at most 4 short items, "
+        "<= 240 characters total. Cite the specific report or debate claim, not generalities.",
     )
     missed_factors: str = Field(
-        description="Factors the team underweighted or did not see that mattered "
-        "to the realized outcome.",
+        description="Factors the team underweighted or did not see that mattered to the "
+        "outcome: at most 4 short items, <= 240 characters total.",
     )
     transferable_lesson: str = Field(
-        description="One concrete, reusable lesson for the next similar analysis.",
+        description="One concrete, reusable lesson for the next similar analysis. "
+        "1-2 sentences, <= 160 characters.",
     )
     self_critique: str = Field(
-        description="A candid flaw in the team's reasoning that a future run "
-        "should avoid repeating.",
+        description="The single most important flaw in the team's reasoning. "
+        "1-2 sentences, <= 160 characters.",
     )
 
 

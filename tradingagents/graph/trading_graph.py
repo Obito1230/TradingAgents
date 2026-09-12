@@ -595,6 +595,9 @@ class TradingAgentsGraph:
             },
             "investment_plan": final_state["investment_plan"],
             "final_trade_decision": final_state["final_trade_decision"],
+            # Audit trail: exactly which memory the Portfolio Manager received
+            # this run (empty string when the memory store had nothing to offer).
+            "past_context": final_state.get("past_context", ""),
         }
 
         # Save to file. Reject ticker values that would escape the

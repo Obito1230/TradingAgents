@@ -6,6 +6,9 @@ from pathlib import Path
 
 from tradingagents.agents.utils.rating import parse_rating
 
+# Fallback cap when config['event_summary_max_chars'] is absent.
+DEFAULT_SUMMARY_MAX_CHARS = 1600
+
 
 class TradingMemoryLog:
     """Append-only markdown log of trading decisions and reflections."""
@@ -36,6 +39,8 @@ class TradingMemoryLog:
         self._max_event_entries = cfg.get("max_event_entries")
         self._event_protect_threshold = cfg.get("event_protect_threshold")
         self._min_per_direction = cfg.get("min_events_per_direction")
+        # Hard cap for stored/injected summaries (see default_config).
+        self._summary_max_chars = cfg.get("event_summary_max_chars") or DEFAULT_SUMMARY_MAX_CHARS
 
         # Evicted events are buffered here for the L3 distillation loop.
         self._distill_queue_path = None
@@ -86,6 +91,18 @@ class TradingMemoryLog:
         except ValueError:
             return None
 
+    def _cap_summary(self, text: str) -> str:
+        """Hard-cap a summary so one event cannot blow the injection budget.
+
+        Applied both when storing (new events) and when formatting for injection
+        (entries written before the cap existed), because up to ``n_same``
+        summaries are re-injected into every future prompt.
+        """
+        limit = self._summary_max_chars or 0
+        if limit <= 0 or len(text) <= limit:
+            return text
+        return text[:limit].rstrip() + "\n...[truncated]"
+
     def store_event(
         self,
         entry_id: str,
@@ -107,6 +124,7 @@ class TradingMemoryLog:
         if not self._lessons_path:
             return
         protected = abs(alpha) >= (self._event_protect_threshold or 0.0)
+        summary = self._cap_summary(summary)
         tag = (
             f"[EVENT | {entry_id} | {trade_date} | {ticker} | {rating} | "
             f"{self._format_pct(alpha)} | {self._format_pct(raw)}]"
@@ -240,7 +258,7 @@ class TradingMemoryLog:
         """Compact injection format for one EVENT entry (no full process)."""
         return (
             f"[{e['trade_date']} | {e['ticker']} | {e['rating']} | "
-            f"{self._format_pct(e['alpha'])}]\n{e['summary']}"
+            f"{self._format_pct(e['alpha'])}]\n{self._cap_summary(e['summary'])}"
         )
 
     def get_lessons_context(self, ticker: str, n_same: int = 5, n_cross: int = 3) -> str:
