@@ -75,7 +75,17 @@ def test_get_rules_context_empty(tmp_path):
 # --- _build_past_context (three-segment composition) -------------------------
 
 def _make_graph(tmp_path):
+    # `config` is required: _build_past_context consults the ablation switch
+    # event_memory_enabled (default True when absent, but a real graph always
+    # carries a config).
+    config = {
+        "memory_log_path": str(tmp_path / "trading_memory.md"),
+        "lessons_path": str(tmp_path / "trading_lessons.md"),
+        "event_protect_threshold": 0.10,
+        "max_event_entries": 200,
+    }
     inst = object.__new__(TradingAgentsGraph)
+    inst.config = config
     inst.memory_log = _make_log(tmp_path)
     return inst
 

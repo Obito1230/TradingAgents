@@ -43,6 +43,7 @@ import csv
 import json
 import os
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -159,13 +160,15 @@ def measure_run(
     config: dict[str, Any] | None = None,
     selected_analysts: list[str] | None = None,
     debug: bool = False,
+    progress: bool = False,
 ) -> tuple[dict[str, Any], str, dict[str, Any]]:
     """Run one propagate() under cost tracking; returns (state, decision, stats).
 
     ``selected_analysts`` restricts the analyst team (e.g. drop "news" for
     A-share runs or to shrink the prompt surface); None keeps the framework
     default (market, social, news, fundamentals). ``debug`` streams node-level
-    output so a long run shows progress.
+    messages; ``progress`` prints one line per completed node with its elapsed
+    time (cleaner for long runs).
     """
     handler = CostTrackingHandler()
     graph_kwargs: dict[str, Any] = {}
@@ -173,6 +176,7 @@ def measure_run(
         graph_kwargs["selected_analysts"] = tuple(selected_analysts)
     ta = TradingAgentsGraph(
         debug=debug,
+        progress=progress,
         config=config if config is not None else DEFAULT_CONFIG.copy(),
         callbacks=[handler],
         **graph_kwargs,
@@ -290,6 +294,38 @@ def _summary(stats: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+class Heartbeat:
+    """Print a progress line every ``interval`` seconds while a run is in flight.
+
+    The graph is silent between node calls, so a long run looks frozen; this
+    makes it obvious the process is alive without waiting for the final line.
+    """
+
+    def __init__(self, label: str, interval: float = 60.0):
+        self.label = label
+        self.interval = interval
+        self._stop = threading.Event()
+        self._start = time.monotonic()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval):
+            print(
+                f"    ... {self.label} still running "
+                f"({time.monotonic() - self._start:.0f}s)",
+                flush=True,
+            )
+
+    def __enter__(self):
+        if self.interval > 0:
+            self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        return False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Run one TradingAgents analysis with cost tracking.")
     ap.add_argument("--ticker", required=True)
@@ -297,14 +333,36 @@ def main() -> int:
     ap.add_argument("--asset-type", default="stock", choices=["stock", "crypto"])
     ap.add_argument("--log", default="cost_log.csv")
     ap.add_argument("--price-json", default=None, help="Optional JSON {model: [in$, out$] per 1M}.")
+    ap.add_argument("--analysts", default=None,
+                    help="Comma-separated analyst keys (market,social,news,fundamentals); "
+                         "default = all four.")
+    ap.add_argument("--debug", action="store_true",
+                    help="Stream node-level output from the graph (verbose progress).")
+    ap.add_argument("--progress", action="store_true",
+                    help="Print one line per completed graph node with its elapsed time.")
+    ap.add_argument("--heartbeat", type=int, default=60,
+                    help="Seconds between 'still running' heartbeat lines (0 disables).")
     args = ap.parse_args()
 
     if args.price_json:
         data = json.loads(Path(args.price_json).read_text(encoding="utf-8"))
         PRICE_USD_PER_1M.update({k: tuple(v) for k, v in data.items()})
 
+    analysts = [a.strip() for a in args.analysts.split(",") if a.strip()] if args.analysts else None
+    print(f"provider={DEFAULT_CONFIG.get('llm_provider')} "
+          f"deep={DEFAULT_CONFIG.get('deep_think_llm')} quick={DEFAULT_CONFIG.get('quick_think_llm')} "
+          f"postmortem={DEFAULT_CONFIG.get('postmortem_llm')} "
+          f"output_language={DEFAULT_CONFIG.get('output_language')} "
+          f"analysts={analysts or 'default'}")
+
+    label = f"{args.ticker} @ {args.date}"
+    print(f"{label} - starting (a full run can take several minutes)", flush=True)
     started_at = datetime.now(timezone.utc).isoformat()
-    _, _, stats = measure_run(args.ticker, args.date, args.asset_type)
+    with Heartbeat(label, interval=args.heartbeat):
+        _, _, stats = measure_run(
+            args.ticker, args.date, args.asset_type,
+            selected_analysts=analysts, debug=args.debug, progress=args.progress,
+        )
 
     row = make_csv_row(args.ticker, args.date, args.asset_type, started_at, stats)
     append_csv(args.log, row)

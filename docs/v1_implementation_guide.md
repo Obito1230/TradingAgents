@@ -199,7 +199,7 @@ env 覆盖(带类型强转):`TRADINGAGENTS_EVENT_ALPHA_THRESHOLD`、`TRADINGAGEN
 | 分块取数 + history 优先 | `dataflows/stockstats_utils.py` | 5 年 OHLCV 按 `TRADINGAGENTS_OHLCV_CHUNK_DAYS`(默认 365 天)分块请求再合并;优先 `Ticker.history`、回退 `yf.download`。单次宽请求在受限网络下会返回空("possibly delisted") |
 | 审核感知重试 | `llm_clients/openai_client.py` | 捕获 GLM `contentFilter` / 错误码 1301 → 重试 `TRADINGAGENTS_MODERATION_RETRIES`(默认 2)次;非审核错误不重试 |
 | 声明式关闭外部源 | `default_config.py`、`agent_utils.py`、`sentiment_analyst.py`、`news_analyst.py`、`trading_graph.py` | `disabled_sources`(env `TRADINGAGENTS_DISABLED_SOURCES`)按 `social` / `macro` / `prediction_markets` 关闭;工具列表 + prompt 文案 + ToolNode 三处同步,避免模型幻觉调用已移除的工具 |
-| 运行可观测性 | `scripts/run_pool.py`、`scripts/cost_accounting.py` | `--analysts` 裁剪分析师(如跳过 news,规避内容审核);`--debug` 流式打印节点进度;`--heartbeat N` 每 N 秒打印"仍在运行"(默认 60s),避免长 run 看起来像卡死 |
+| 运行可观测性 | `scripts/run_pool.py`、`scripts/cost_accounting.py` | `--analysts` 裁剪分析师(如跳过 news,规避内容审核);**`--progress` 每个节点完成打印一行 + 耗时**(实现:LangGraph 双模式流 `['updates','values']`——`updates` 在节点完成时发出,相邻间隔即该节点耗时;`values` 保证最终状态与 `invoke` 一致);`--heartbeat N` 每 N 秒打印"仍在运行"(默认 60s);`--debug` 流式打印节点消息(啰嗦,调试用) |
 | 诊断 / 验收脚本 | `scripts/diagnose_yfinance.py`、`scripts/verify_l1.py` | 网络路径诊断 / L1 落盘确定性验收 |
 
 **原则**:个人 provider / 模型写 `.env`,**不改源码默认值**(源码默认值保持 provider 中立——否则测试会红、可复现性受损)。
@@ -220,10 +220,15 @@ env 覆盖(带类型强转):`TRADINGAGENTS_EVENT_ALPHA_THRESHOLD`、`TRADINGAGEN
 | 验收 | `verify_l1.py --expect-settle` → **4/4 checks passed** |
 | 成本 | 完整分析 12 调用 / 152,589 tok / 904s / $0.086;结算+复盘 2 调用 / 27,227 tok / 258s / $0.019 → **一个"决策→结算→落库"周期 ≈ $0.105 / ~19 分钟** |
 | 复盘价值(实证) | 复盘摘要抓到了原管线未发现的缺陷:① "证据的缺席被当成利好证据"(情绪报告已警告过);② 基本面报告"常态化净利 266.7 亿"的口径/算术不一致,且全链条无人复核;③ 主动声明结果偏倚 |
+| **注入进入真实决策** | 2026-04-08 重跑同一标的:`check_injection_audit.py` → `past_context: 4260 chars`,segments 含 `L1 events (this ticker)` + `legacy decision-log fallback`,preview 含 `[2026-03-04 \| 300750.SZ \| Buy \| +13.1%]`。该 run 评级 Overweight(现价 383.82,未复制记忆的"327–332 建仓",而是等回踩 365–377)/ 2002s / 219,414 tok(out 112K > in 107K)/ $0.167 |
+| 实验设计要点 | 4260 chars 里 L1 事件段 ≈1.7K、legacy 决策日志段 ≈2.6K。**legacy 段在两臂都存在**,所以记忆开/关的 A/B 差异纯粹来自 L1 事件段——干净的对照设计(注意:审计只证明"被注入 prompt",不能证明"被模型采用",后者需 P1 配对实验) |
 
 ### 9.2 打磨清单(v1.1)
 
-- [ ] **事件摘要过长**:实测单条 SUMMARY ≈ 2,300 字,与设计目标"在保证内容的前提下尽量精简"冲突,直接抬高注入预算(削弱 P4"同等或更低 token 预算"的论据)。建议:① 在 `EventPostmortem` 各字段 description 里加长度约束(如 Summary ≤ 2 句、Key Basis/Missed Factors ≤ 4 条);② `store_event` 加硬上限(超出截断并标注);③ 注入时按事件截断。
-- [ ] **legacy 反思语言不一致**:`Reflector` 的 prompt 未调用 `get_language_instruction()`,因此 `output_language=Chinese` 时,注入内容里 L1 事件是中文、决策日志 REFLECTION 是英文。建议在 `reflection.py` 补上语言指令。
+- [x] **事件摘要过长**(已修):实测单条 SUMMARY ≈ 2,323 字。三层防护:① `EventPostmortem` 字段级预算(总目标 ≤ 900 字);② `event_summary_max_chars`(默认 1600,env `TRADINGAGENTS_EVENT_SUMMARY_MAX_CHARS`)存储硬上限;③ 注入时兜底截断(覆盖历史长条目)。**实测既有条目注入长度 2,323 → 1,710 字。**
+- [x] **legacy 反思语言不一致**(已修):`Reflector` 补上 `get_language_instruction()`;并顺带修掉一个更严重的缺陷——prompt 原先在**构造时缓存**,导致运行期改配置不生效,现改为**每次调用重建**。
+- [x] **注入审计**(新增):`_log_state` 记录本次 run 实际注入的 `past_context`,使"记忆是否被读取"可事后核验(新脚本 `scripts/check_injection_audit.py`)。
+- [x] **A 股时区 bug**(已修,本轮回归引入):取数改优先 `Ticker.history` 后,它对 A 股返回 **tz-aware** 索引(`Asia/Shanghai`),而 `load_ohlcv` 用无时区 `curr_date` 比较 → `Invalid comparison between dtype=datetime64[ns, Asia/Shanghai] and Timestamp`。修法:`_to_naive_dates()` **丢弃时区但不做转换**(UTC 转换会把东八区日期倒退一天),同时加固 `_coerce_ohlcv_dates`/陈旧校验。实测 `load_ohlcv('300750.SZ','2026-03-04')` 收盘 332.4194,与扫描表完全一致。
+- [x] **控制台 GBK 崩溃**(已修):脚本打印记忆正文时遇到 U+2212 等字符会 `UnicodeEncodeError`;`show_injection` / `settle_now` / `verify_l1` / `check_injection_audit` 均加 `sys.stdout.reconfigure(errors="replace")`。想要完整中文显示可先 `chcp 65001`。
 - [ ] `hits` / `last_accessed` 回写已有实现,但尚无"遗忘是否真的按访问频次生效"的端到端验证(多跑几轮后观察 distill queue)。
 - [ ] 保护集只增不减(L3 未实现前),文件体积会单调增长——v2 蒸馏落地后闭环。

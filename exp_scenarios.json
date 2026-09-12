@@ -1,0 +1,20 @@
+[
+  {
+    "ticker": "600519.SS",
+    "date": "2026-01-22",
+    "label": "moutai-mild-win",
+    "note": "scan ret_10d +16.0%; realized outcome resolved at run time"
+  },
+  {
+    "ticker": "601318.SS",
+    "date": "2026-06-15",
+    "label": "pingan-loss",
+    "note": "scan ret_5d -7.1% / ret_10d -12.0%"
+  },
+  {
+    "ticker": "000001.SZ",
+    "date": "2026-07-17",
+    "label": "pabank-mild",
+    "note": "scan ret_10d +7.9%"
+  }
+]

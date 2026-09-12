@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -73,6 +74,7 @@ class TradingAgentsGraph:
         debug=False,
         config: dict[str, Any] = None,
         callbacks: list | None = None,
+        progress: bool = False,
     ):
         """Initialize the trading agents graph and components.
 
@@ -81,8 +83,12 @@ class TradingAgentsGraph:
             debug: Whether to run in debug mode
             config: Configuration dictionary. If None, uses default config
             callbacks: Optional list of callback handlers (e.g., for tracking LLM/tool stats)
+            progress: Print one line per completed graph node with its elapsed
+                time. Gives a clean node-level trace during long runs, where the
+                graph is otherwise silent between LLM calls.
         """
         self.debug = debug
+        self.progress = progress
         self.config = config or DEFAULT_CONFIG
         self.callbacks = callbacks or []
 
@@ -321,6 +327,8 @@ class TradingAgentsGraph:
         threshold = self.config.get("event_alpha_threshold", 0.05)
         if abs(alpha) < threshold:
             return
+        if not self.config.get("event_memory_enabled", True):
+            return  # ablation arm: no event is written either
 
         state_path = self._full_state_path(ticker, entry["date"])
         state: dict[str, Any] = {}
@@ -371,6 +379,12 @@ class TradingAgentsGraph:
         Trade-off: only same-ticker entries are resolved per run.  Entries for
         other tickers accumulate until that ticker is run again.
         """
+        # Frozen-memory mode (paired A/B): never settle, never reflect. Settling
+        # here would turn a previous run's own decision into an L1 event, which
+        # the next "on"-arm run of the same ticker would then be shown.
+        config = getattr(self, "config", None)
+        if isinstance(config, dict) and config.get("memory_readonly"):
+            return
         pending = [e for e in self.memory_log.get_pending_entries() if e["ticker"] == ticker]
         if not pending:
             return
@@ -493,11 +507,14 @@ class TradingAgentsGraph:
         L1 event summaries (recency top-k), then the legacy decision-log
         reflections as fallback during migration.
         """
-        parts = [
-            self.memory_log.get_rules_context(),
-            self.memory_log.get_lessons_context(ticker),
-            self.memory_log.get_past_context(ticker),
-        ]
+        parts = [self.memory_log.get_rules_context()]
+        # Ablation switch: with event_memory_enabled=False the L1 segment is
+        # neither read nor written, so the "memory off" arm is exactly the
+        # baseline pipeline (legacy decision-log reflections still apply to both
+        # arms, keeping the comparison clean).
+        if self.config.get("event_memory_enabled", True):
+            parts.append(self.memory_log.get_lessons_context(ticker))
+        parts.append(self.memory_log.get_past_context(ticker))
         return "\n\n".join(p for p in parts if p)
 
     def _run_graph(self, company_name, trade_date, asset_type: str = "stock"):
@@ -521,7 +538,26 @@ class TradingAgentsGraph:
             tid = thread_id(company_name, str(trade_date), self._run_signature(asset_type))
             args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = tid
 
-        if self.debug:
+        if self.progress:
+            # Node-level progress: stream "updates" alongside "values". Each
+            # "updates" chunk is emitted when a node FINISHES, so the gap between
+            # two consecutive chunks is that node's wall time. "values" still
+            # carries the authoritative full state at every step.
+            stream_args = dict(args)
+            stream_args.pop("stream_mode", None)
+            final_state = {}
+            previous = time.monotonic()
+            for mode, chunk in self.graph.stream(
+                init_agent_state, stream_mode=["updates", "values"], **stream_args
+            ):
+                if mode == "values":
+                    final_state = chunk
+                    continue
+                now = time.monotonic()
+                for node in chunk:
+                    print(f"  [progress] {node}: {now - previous:.0f}s", flush=True)
+                previous = now
+        elif self.debug:
             trace = []
             last_printed = None
             for chunk in self.graph.stream(init_agent_state, **args):

@@ -37,6 +37,12 @@ _ENV_OVERRIDES = {
     # social (StockTwits+Reddit), macro (FRED), prediction_markets (Polymarket).
     "TRADINGAGENTS_DISABLED_SOURCES":        "disabled_sources",
     "TRADINGAGENTS_EVENT_SUMMARY_MAX_CHARS": "event_summary_max_chars",
+    "TRADINGAGENTS_EVENT_MEMORY_ENABLED":    "event_memory_enabled",
+    # NOTE: ``memory_readonly`` is deliberately NOT env-overridable. It exists
+    # only for the paired A/B harness, which sets it in-process on a per-run
+    # config copy. Exposing it as TRADINGAGENTS_MEMORY_READONLY would let a
+    # stray .env line freeze the memory store silently: every run would still
+    # succeed while writing nothing.
 }
 
 
@@ -100,6 +106,16 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # distill_interval_days for the L3 distillation loop.
     "event_alpha_threshold": 0.05,
     "event_protect_threshold": 0.10,
+    # Ablation switch for the A/B experiment: False = "memory off" arm, where the
+    # L1 layer neither reads nor writes (legacy decision-log reflections apply to
+    # both arms, so the difference is purely the L1 layer).
+    "event_memory_enabled": True,
+    # Freeze the memory store: read paths keep working, every write path is a
+    # no-op and pending entries are never settled. The paired A/B harness sets
+    # this so both arms observe an identical, immutable store — without it, a
+    # run's own decision gets settled by the next run of the same ticker and
+    # becomes an L1 event for the scenario being scored (self-leak).
+    "memory_readonly": False,
     # Hard cap on a stored/injected L1 event summary (characters). The postmortem
     # schema asks for ~900; this bounds it regardless of what the model returns,
     # because up to n_same summaries are re-injected into every future prompt.

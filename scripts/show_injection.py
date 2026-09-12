@@ -28,6 +28,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# Windows consoles often default to a legacy code page (GBK); memory text can
+# contain characters it cannot encode (e.g. U+2212 minus), which would crash the
+# print. Degrade those characters instead of failing.
+try:
+    sys.stdout.reconfigure(errors="replace")
+except (AttributeError, ValueError):  # pragma: no cover - platform dependent
+    pass
+
 from tradingagents.agents.utils.memory import TradingMemoryLog  # noqa: E402
 from tradingagents.default_config import DEFAULT_CONFIG  # noqa: E402
 from tradingagents.graph.trading_graph import TradingAgentsGraph  # noqa: E402

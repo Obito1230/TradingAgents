@@ -27,8 +27,6 @@ import argparse
 import importlib.util
 import json
 import sys
-import threading
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -63,6 +61,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--dry-run", action="store_true", help="List scenarios without running.")
     ap.add_argument("--debug", action="store_true",
                     help="Stream node-level output from the graph (verbose progress).")
+    ap.add_argument("--progress", action="store_true",
+                    help="Print one line per completed graph node with its elapsed time.")
     ap.add_argument("--heartbeat", type=int, default=60,
                     help="Seconds between 'still running' heartbeat lines (0 disables).")
     ap.add_argument("--analysts", default=None,
@@ -111,34 +111,6 @@ def shift_date(date: str, days: int) -> str:
     return (datetime.strptime(date, "%Y-%m-%d") + timedelta(days=days)).strftime("%Y-%m-%d")
 
 
-class Heartbeat:
-    """Print a progress line every ``interval`` seconds while a run is in flight.
-
-    The graph is silent between node calls, so a long run looks frozen; this
-    makes it obvious the process is alive without waiting for the final line.
-    """
-
-    def __init__(self, label: str, interval: float = 60.0):
-        self.label = label
-        self.interval = interval
-        self._stop = threading.Event()
-        self._start = time.monotonic()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-
-    def _run(self) -> None:
-        while not self._stop.wait(self.interval):
-            print(f"    ... {self.label} still running ({time.monotonic() - self._start:.0f}s)", flush=True)
-
-    def __enter__(self):
-        if self.interval > 0:
-            self._thread.start()
-        return self
-
-    def __exit__(self, *exc):
-        self._stop.set()
-        return False
-
-
 def main() -> int:
     args = parse_args()
     pool = load_pool(args.pool)
@@ -166,10 +138,10 @@ def main() -> int:
             started_at = datetime.now(timezone.utc).isoformat()
             label = f"{ticker} @ {run_date}"
             print(f"  [{cat}/{pass_label}] {label} - starting (a full run can take several minutes)", flush=True)
-            with Heartbeat(label, interval=args.heartbeat):
+            with cost.Heartbeat(label, interval=args.heartbeat):
                 _, _, stats = cost.measure_run(
                     ticker, run_date, asset_type_of(ticker),
-                    selected_analysts=analysts, debug=args.debug,
+                    selected_analysts=analysts, debug=args.debug, progress=args.progress,
                 )
             row = cost.make_csv_row(
                 ticker, run_date, asset_type_of(ticker), started_at, stats,

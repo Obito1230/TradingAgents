@@ -854,6 +854,10 @@ class TestLegacyRemoval:
         mock_graph.memory_log = TradingMemoryLog({"memory_log_path": str(tmp_path / "mem.md")})
         mock_graph.log_states_dict = {}
         mock_graph.debug = False
+        # Explicitly falsy: this instance is a MagicMock, so an unset boolean
+        # flag (e.g. the newer `progress`) would read as truthy and divert
+        # _run_graph into a streaming branch the fake graph cannot serve.
+        mock_graph.progress = False
         mock_graph.config = {"results_dir": str(tmp_path)}
         mock_graph.graph.invoke.return_value = fake_state
         mock_graph.propagator.create_initial_state.return_value = fake_state

@@ -27,6 +27,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tradingagents.agents.utils.memory import TradingMemoryLog  # noqa: E402
 from tradingagents.default_config import DEFAULT_CONFIG  # noqa: E402
 
+# Windows consoles often default to a legacy code page (GBK); memory text can
+# contain characters it cannot encode, which would crash the print.
+try:
+    sys.stdout.reconfigure(errors="replace")
+except (AttributeError, ValueError):  # pragma: no cover - platform dependent
+    pass
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Verify the L1 memory-chain demo artifacts.")

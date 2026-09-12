@@ -33,6 +33,13 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
 
+# Windows consoles often default to a legacy code page (GBK); memory text can
+# contain characters it cannot encode, which would crash the print.
+try:
+    sys.stdout.reconfigure(errors="replace")
+except (AttributeError, ValueError):  # pragma: no cover - platform dependent
+    pass
+
 
 def _load(name: str, path: Path):
     spec = importlib.util.spec_from_file_location(name, path)

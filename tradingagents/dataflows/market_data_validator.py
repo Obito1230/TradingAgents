@@ -15,7 +15,7 @@ from collections.abc import Iterable
 import pandas as pd
 from stockstats import wrap
 
-from tradingagents.dataflows.stockstats_utils import load_ohlcv
+from tradingagents.dataflows.stockstats_utils import _to_naive_dates, load_ohlcv
 
 # A fixed, common indicator set so the snapshot is the same shape every run.
 DEFAULT_SNAPSHOT_INDICATORS: tuple[str, ...] = (
@@ -37,7 +37,9 @@ def _verified_rows(symbol: str, curr_date: str) -> pd.DataFrame:
         raise ValueError(f"No OHLCV data available for {symbol}.")
 
     df = data.copy()
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    # tz-naive on purpose: this path re-applies a naive curr_date cutoff, and a
+    # tz-aware Date column would raise a pandas comparison error instead.
+    df["Date"] = _to_naive_dates(df["Date"])
     df = df.dropna(subset=["Date"])
     df = df[df["Date"] <= pd.to_datetime(curr_date)].sort_values("Date")
     if df.empty:

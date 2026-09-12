@@ -67,11 +67,20 @@ def test_case_insensitive_lookup():
 
 @pytest.fixture
 def cli_utils(monkeypatch):
-    """Import cli.utils with a fresh environment so module-level state is consistent."""
+    """Import cli.utils with a fresh environment so module-level state is consistent.
+
+    ``find_dotenv(usecwd=True)`` walks *up* from the test's tmp dir. When pytest's
+    basetemp sits inside the repository (``--basetemp=.pytest_tmp``) that walk
+    reaches the developer's real ``.env``, and ``set_key`` then overwrites a real
+    API key with the fake value these tests paste. Disable the walk so the cwd
+    fallback — the test's own tmp dir — is always used.
+    """
     import importlib
 
     import cli.utils as cli_utils_module
-    return importlib.reload(cli_utils_module)
+    module = importlib.reload(cli_utils_module)
+    monkeypatch.setattr(module, "find_dotenv", lambda *args, **kwargs: "")
+    return module
 
 
 def test_ensure_api_key_returns_existing(monkeypatch, cli_utils):

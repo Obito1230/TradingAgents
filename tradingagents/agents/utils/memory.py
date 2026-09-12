@@ -21,6 +21,12 @@ class TradingMemoryLog:
 
     def __init__(self, config: dict = None):
         cfg = config or {}
+        # Read-only mode: every write path becomes a no-op while the read paths
+        # keep working. Used by the paired A/B harness, which must observe a
+        # FROZEN memory — otherwise a rep's own decision would be settled (and
+        # turned into an L1 event) by the next run of the same ticker, showing
+        # the "on" arm its own outcome.
+        self._readonly = bool(cfg.get("memory_readonly", False))
         self._log_path = None
         path = cfg.get("memory_log_path")
         if path:
@@ -58,7 +64,7 @@ class TradingMemoryLog:
         final_trade_decision: str,
     ) -> None:
         """Append pending entry at end of propagate(). No LLM call."""
-        if not self._log_path:
+        if self._readonly or not self._log_path:
             return
         # Idempotency guard: fast raw-text scan instead of full parse
         if self._log_path.exists():
@@ -121,7 +127,7 @@ class TradingMemoryLog:
         The entry stores a structured summary + a pointer to the full debate
         trace JSON — never the full process — so prompt injection stays bounded.
         """
-        if not self._lessons_path:
+        if self._readonly or not self._lessons_path:
             return
         protected = abs(alpha) >= (self._event_protect_threshold or 0.0)
         summary = self._cap_summary(summary)
@@ -405,7 +411,7 @@ class TradingMemoryLog:
         (and merged-out) entries are buffered to the distill queue for L3, and
         the per-direction floor keeps both big wins and big losses represented.
         """
-        if not self._lessons_path or not self._lessons_path.exists():
+        if self._readonly or not self._lessons_path or not self._lessons_path.exists():
             return
         entries = self.load_lessons()
         if not entries:
@@ -465,7 +471,7 @@ class TradingMemoryLog:
         its tag with return figures, and appends a REFLECTION section.  Uses
         a temp-file + os.replace() so a crash mid-write never corrupts the log.
         """
-        if not self._log_path or not self._log_path.exists():
+        if self._readonly or not self._log_path or not self._log_path.exists():
             return
 
         text = self._log_path.read_text(encoding="utf-8")
@@ -521,7 +527,7 @@ class TradingMemoryLog:
         Each element of updates must have keys: ticker, trade_date,
         raw_return, alpha_return, holding_days, reflection.
         """
-        if not self._log_path or not self._log_path.exists() or not updates:
+        if self._readonly or not self._log_path or not self._log_path.exists() or not updates:
             return
 
         text = self._log_path.read_text(encoding="utf-8")

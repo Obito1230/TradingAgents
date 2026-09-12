@@ -176,10 +176,33 @@ def _fetch_ohlcv_history(
     return merged
 
 
+def _to_naive_dates(values) -> pd.Series:
+    """Parse dates to tz-naive, preserving the exchange's local trading date.
+
+    ``Ticker.history`` attaches the venue timezone to the index for many
+    exchanges (e.g. ``Asia/Shanghai`` for A-shares). Converting to UTC would
+    shift the date back a day for east-of-UTC venues, so the offset is dropped
+    WITHOUT conversion. Without this, the naive ``curr_date`` filters in
+    ``load_ohlcv`` raise "Invalid comparison between dtype=datetime64[ns,
+    Asia/Shanghai] and Timestamp".
+    """
+    try:
+        parsed = pd.to_datetime(values, errors="coerce")
+    except (ValueError, TypeError):
+        # Mixed tz-aware / tz-naive values cannot be parsed in one pass; strip
+        # the offset text and retry.
+        stripped = [str(v).replace("Z", "").split("+")[0].split("-0")[0] for v in values]
+        return pd.to_datetime(stripped, errors="coerce")
+    tz = getattr(getattr(parsed, "dt", None), "tz", None)
+    if tz is not None:
+        return parsed.dt.tz_localize(None)
+    return parsed
+
+
 def _clean_dataframe(data: pd.DataFrame) -> pd.DataFrame:
     """Normalize a stock DataFrame for stockstats: parse dates, drop invalid rows, fill price gaps."""
     data = _ensure_date_column(data)
-    data["Date"] = pd.to_datetime(data["Date"], errors="coerce")
+    data["Date"] = _to_naive_dates(data["Date"])
     data = data.dropna(subset=["Date"])
 
     price_cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in data.columns]
@@ -191,17 +214,21 @@ def _clean_dataframe(data: pd.DataFrame) -> pd.DataFrame:
 
 
 def _coerce_ohlcv_dates(data: pd.DataFrame) -> pd.Series:
-    """Return parsed dates from an OHLCV frame, whether Date is a column or the index."""
+    """Return parsed dates from an OHLCV frame, whether Date is a column or the index.
+
+    Uses ``_to_naive_dates`` so a tz-aware index (Ticker.history on many
+    exchanges) cannot break downstream naive date comparisons.
+    """
     if "Date" in data.columns:
-        return pd.to_datetime(data["Date"], errors="coerce").dropna()
+        return _to_naive_dates(data["Date"]).dropna()
     # yfinance keeps the dates in the index (a DatetimeIndex, sometimes unnamed).
     if isinstance(data.index, pd.DatetimeIndex):
-        return pd.Series(pd.to_datetime(data.index, errors="coerce")).dropna()
+        return _to_naive_dates(pd.Series(data.index)).dropna()
     # Fallback: expose the index and look for any date-like column.
     df = data.reset_index()
     for col in ("Date", "Datetime", "date", "index"):
         if col in df.columns:
-            parsed = pd.to_datetime(df[col], errors="coerce").dropna()
+            parsed = _to_naive_dates(df[col]).dropna()
             if not parsed.empty:
                 return parsed
     return pd.Series(dtype="datetime64[ns]")
