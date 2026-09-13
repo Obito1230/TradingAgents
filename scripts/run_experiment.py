@@ -120,6 +120,27 @@ def hit_of(rating: str, alpha: float | None) -> float | None:
     return 1.0 if (alpha > 0) == (rating in BULLISH) else 0.0
 
 
+def injected_chars(ticker: str, trade_date: str, config: dict | None = None) -> int | None:
+    """Characters of memory this run actually received, read from its own archive.
+
+    The two arms write the SAME filename (``full_states_log_<date>.json``), so the
+    arm that runs second overwrites the first one's copy. Reading the file
+    immediately after each run is therefore the only way to capture BOTH arms'
+    injection budgets — the C2 claim is about injected budget, and it should be
+    measured per run rather than derived.
+
+    ``config`` is injectable so tests can point at a temporary results dir.
+    """
+    inst = object.__new__(TradingAgentsGraph)
+    inst.config = config or DEFAULT_CONFIG
+    try:
+        path = TradingAgentsGraph._full_state_path(inst, ticker, trade_date)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return len(payload.get("past_context", "") or "")
+    except (OSError, json.JSONDecodeError, KeyError, AttributeError):
+        return None
+
+
 def _fmt(value, spec: str = ".4f") -> str:
     return "n/a" if value is None else format(value, spec)
 
@@ -156,7 +177,11 @@ def _print_estimate(run_count: int, cost_log: str, per_run_s: float | None = Non
 
 def summarize(rows: list[dict], arms: list[str]) -> None:
     print("\n--- per arm ---")
-    header = (f"{'arm':6} {'n':>3} {'hit':>7} {'mean_alpha':>11} "
+    # NOTE: no ``mean_alpha`` column. Realized alpha is a property of the
+    # SCENARIO, not of the arm — it is identical in both arms by construction
+    # (measured: 0.0614 in each), so printing it per arm invites the false
+    # reading "both arms performed the same". It is reported once, below.
+    header = (f"{'arm':6} {'n':>3} {'hit':>7} {'inj_chars':>10} "
               f"{'mean_tok':>9} {'mean_$':>8} {'mean_s':>7} {'hold%':>6}")
     print(header)
     print("-" * len(header))
@@ -166,17 +191,45 @@ def summarize(rows: list[dict], arms: list[str]) -> None:
             print(f"{arm:6}   0   (no successful runs)")
             continue
         hits = [r["hit"] for r in arows if r["hit"] is not None]
-        alphas = [r["alpha"] for r in arows if r["alpha"] is not None]
+        injected = [r["injected_chars"] for r in arows if r.get("injected_chars")]
         holds = sum(1 for r in arows if r["rating"] == "Hold")
         mean_hit = statistics.mean(hits) if hits else None
-        mean_alpha = statistics.mean(alphas) if alphas else None
+        mean_inj = statistics.mean(injected) if injected else None
         print(
-            f"{arm:6} {len(arows):>3} {_fmt(mean_hit, '.2f'):>7} {_fmt(mean_alpha):>11} "
+            f"{arm:6} {len(arows):>3} {_fmt(mean_hit, '.2f'):>7} "
+            f"{(f'{mean_inj:.0f}' if mean_inj is not None else 'n/a'):>10} "
             f"{statistics.mean([r['tokens_total'] for r in arows]):>9.0f} "
             f"{statistics.mean([r['cost_usd'] or 0 for r in arows]):>8.4f} "
             f"{statistics.mean([r['duration_s'] for r in arows]):>7.0f} "
             f"{100 * holds / len(arows):>5.0f}%"
         )
+
+    alphas = [r["alpha"] for r in rows if r.get("alpha") is not None]
+    if alphas:
+        print(f"\n  mean realized alpha of these scenarios: {statistics.mean(alphas):+.4f}"
+              "  (scenario property — arm-independent, NOT an arm-level return)")
+    hits_all = [r["hit"] for r in rows if r.get("hit") is not None]
+    holds_all = sum(1 for r in rows if r["rating"] == "Hold")
+    if rows:
+        # Printed even when there are ZERO hits: an all-Hold pilot yields no
+        # scoreable observation at all, which is exactly the case where nobody
+        # should be reading a hit rate off the table above.
+        print(f"  scored observations (non-Hold, alpha known): {len(hits_all)} of {len(rows)}"
+              f"   |  Hold (unscored): {holds_all}")
+        if len(hits_all) < 10:
+            print("  *** fewer than 10 scored observations — report effect sizes only,"
+                  " do NOT claim significance ***")
+
+    # Injected budget ratio: the deterministic quantity C2 reports. Labelled with
+    # the arm names so it does not depend on the --arms ordering.
+    per_arm_inj = {a: [r["injected_chars"] for r in rows
+                       if r["arm"] == a and r.get("injected_chars")] for a in arms}
+    if len(arms) == 2 and all(per_arm_inj.values()):
+        a0, a1 = arms
+        m0 = statistics.mean(per_arm_inj[a0])
+        m1 = statistics.mean(per_arm_inj[a1])
+        print(f"  injected budget: {a0}={m0:.0f} chars, {a1}={m1:.0f} chars"
+              f"  -> {a0}/{a1} = {m0 / m1:.0%}")
 
     if len(arms) == 2 and rows:
         print("\n--- paired (same scenario + repetition) ---")
@@ -189,11 +242,15 @@ def summarize(rows: list[dict], arms: list[str]) -> None:
             same = sum(1 for v in both.values()
                        if v[arms[0]]["rating"] == v[arms[1]]["rating"])
             print(f"  identical rating across arms   : {same}/{len(both)}")
+            print(f"  scored pairs (both arms non-Hold): "
+                  f"{sum(1 for v in both.values() if all(v[a]['hit'] is not None for a in arms))}")
             for key in sorted(both):
                 a0, a1 = both[key][arms[0]], both[key][arms[1]]
                 print(f"    {key[0]}@{key[1]} rep{key[2]}: "
-                      f"{arms[0]}={a0['rating'] or '-'} ({a0['tokens_total']} tok) | "
-                      f"{arms[1]}={a1['rating'] or '-'} ({a1['tokens_total']} tok)")
+                      f"{arms[0]}={a0['rating'] or '-'} ({a0['tokens_total']} tok, "
+                      f"{a0.get('injected_chars') or '?'} inj) | "
+                      f"{arms[1]}={a1['rating'] or '-'} ({a1['tokens_total']} tok, "
+                      f"{a1.get('injected_chars') or '?'} inj)")
 
 
 def main() -> int:
@@ -335,6 +392,7 @@ def main() -> int:
                     "hit": hit_of(stats["rating"], alpha),
                     "status": stats["status"],
                     "error": stats["error"],
+                    "injected_chars": injected_chars(ticker, date),
                     "tokens_total": stats["tokens_total"],
                     "cost_usd": stats["cost_usd"],
                     "duration_s": stats["duration_s"],
