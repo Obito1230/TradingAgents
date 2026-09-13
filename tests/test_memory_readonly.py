@@ -161,3 +161,35 @@ def test_reads_work_against_a_store_that_was_frozen(tmp_path):
     assert len(frozen.load_entries()) == 1
     assert "frozen summary" in frozen.get_lessons_context("NVDA")
     assert "Good call." in frozen.get_past_context("NVDA")
+
+
+# --- GET paths must not write, even though they normally do ------------------
+
+def test_frozen_read_does_not_rewrite_the_store(tmp_path):
+    """``get_lessons_context`` bumps hit counters and rewrites the file.
+
+    Eviction priority is access-based (``_recency_key`` sorts on
+    last_accessed/hits first), so an experiment read that rewrote the store
+    would silently change which events survive future maintenance.
+    """
+    writable = _log(tmp_path, readonly=False)
+    _seed_event(writable)
+    path = tmp_path / "trading_lessons.md"
+    before = path.read_bytes()
+
+    frozen = _log(tmp_path, readonly=True)
+    assert "frozen summary" in frozen.get_lessons_context("NVDA")   # read works
+    assert path.read_bytes() == before                             # …write did not
+
+
+def test_writable_read_does_rewrite_the_store(tmp_path):
+    """Control: without the guard the same read bumps hits on disk."""
+    log = _log(tmp_path, readonly=False)
+    _seed_event(log)
+    path = tmp_path / "trading_lessons.md"
+    before = path.read_bytes()
+
+    log.get_lessons_context("NVDA")
+
+    assert path.read_bytes() != before
+    assert log.load_lessons()[0]["hits"] == 1

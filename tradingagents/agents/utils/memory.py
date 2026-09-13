@@ -10,6 +10,17 @@ from tradingagents.agents.utils.rating import parse_rating
 DEFAULT_SUMMARY_MAX_CHARS = 1600
 
 
+def _as_date(value) -> str:
+    """Normalise a date-ish value to ``YYYY-MM-DD`` for string comparison.
+
+    Time slicing compares dates as strings, so a ``datetime`` / ``Timestamp``
+    (``"2026-03-04 00:00:00"``) would otherwise sort *after* the same calendar
+    day and silently re-admit same-day material — the exact leak the slice
+    exists to prevent. Non-strings and timestamps are therefore truncated.
+    """
+    return str(value or "")[:10]
+
+
 class TradingMemoryLog:
     """Append-only markdown log of trading decisions and reflections."""
 
@@ -129,6 +140,14 @@ class TradingMemoryLog:
         """
         if self._readonly or not self._lessons_path:
             return
+        # Idempotency on entry_id (E-<date>-<ticker> = one decision). Re-running an
+        # already-settled (ticker, date) — a plain re-run, or the same scenario in
+        # two pools — used to append a SECOND event with the same id but a
+        # possibly different rating, leaving the store asserting that the team
+        # decided both "Buy" and "Hold" for the same day.
+        if self._lessons_path.exists():
+            if f"[EVENT | {entry_id} |" in self._lessons_path.read_text(encoding="utf-8"):
+                return
         protected = abs(alpha) >= (self._event_protect_threshold or 0.0)
         summary = self._cap_summary(summary)
         tag = (
@@ -252,8 +271,15 @@ class TradingMemoryLog:
 
         Keeps a trailing separator so a later store_event() append stays a
         separate block (matching the decision-log convention).
+
+        Frozen mode short-circuits here rather than at each caller: this is the
+        single chokepoint every lessons write goes through, and GET paths reach
+        it too (``get_lessons_context`` bumps hit counters). Without the guard a
+        "frozen" A/B run would still rewrite the store on every read — and since
+        eviction priority is access-based (``_recency_key``), those reads would
+        silently change which events survive future maintenance.
         """
-        if not self._lessons_path or not entries:
+        if self._readonly or not self._lessons_path or not entries:
             return
         text = self._SEPARATOR.join(self._render_event_entry(e) for e in entries) + self._SEPARATOR
         tmp_path = self._lessons_path.with_suffix(".tmp")
@@ -267,7 +293,8 @@ class TradingMemoryLog:
             f"{self._format_pct(e['alpha'])}]\n{self._cap_summary(e['summary'])}"
         )
 
-    def get_lessons_context(self, ticker: str, n_same: int = 5, n_cross: int = 3) -> str:
+    def get_lessons_context(self, ticker: str, n_same: int = 5, n_cross: int = 3,
+                            as_of: str | None = None) -> str:
         """Return L1 event context for injection, and bump access metadata.
 
         Retrieval is recency-first with a per-direction floor: at least
@@ -275,8 +302,20 @@ class TradingMemoryLog:
         winning streak can't crowd out the last bear-market lessons. Selected
         entries have hits / last_accessed rewritten back to disk (one small
         atomic write per run — negligible at a few hundred entries).
+
+        ``as_of`` is the date of the decision being made. Events dated on or
+        after it are FUTURE information for that decision and are excluded —
+        without this a backtest leaks hindsight: an event settled in June would
+        otherwise be injected into a January decision, and the "memory on" arm
+        would win by clairvoyance rather than by using memory.
         """
-        entries = self.load_lessons()
+        all_entries = self.load_lessons()
+        if not all_entries:
+            return ""
+        entries = all_entries
+        if as_of:
+            cutoff = _as_date(as_of)
+            entries = [e for e in all_entries if _as_date(e.get("trade_date", "")) < cutoff]
         if not entries:
             return ""
 
@@ -294,7 +333,11 @@ class TradingMemoryLog:
             if e["entry_id"] in selected_ids:
                 e["hits"] = e.get("hits", 0) + 1
                 e["last_accessed"] = now
-        self._rewrite_lessons(entries)
+        # Write back the FULL set, never just the time-sliced subset. This call
+        # rewrites the file, so passing the filtered list would DELETE every
+        # event dated on/after as_of — a sliced read would silently destroy the
+        # very future events it is meant to keep out of the prompt.
+        self._rewrite_lessons(all_entries)
 
         parts = []
         if same:
@@ -305,8 +348,14 @@ class TradingMemoryLog:
             parts.extend(self._format_event(e) for e in cross)
         return "\n\n".join(parts)
 
-    def get_rules_context(self) -> str:
-        """Return distilled team rules as a prompt preamble. v1: no rules yet."""
+    def get_rules_context(self, as_of: str | None = None) -> str:
+        """Return distilled team rules as a prompt preamble. v1: no rules yet.
+
+        ``as_of`` accepts the decision date for the same reason the L1 store does:
+        once L3 distils rules from evicted events, a rule derived in June must not
+        reach a January decision. v1 returns nothing, but the parameter is part of
+        the interface so the L3 implementation cannot forget it.
+        """
         return ""
 
     # --- Lessons maintenance (simplified forgetting) ---
@@ -345,20 +394,32 @@ class TradingMemoryLog:
         return picked
 
     def _dedupe_events(self, entries):
-        """Remove literal duplicates (same ticker+trade_date+rating).
+        """Remove literal duplicates (same ticker+trade_date+rating) and any
+        repeat of an ``entry_id``.
+
+        ``entry_id`` is the natural key (``E-<date>-<ticker>``): two entries
+        sharing one means the same decision was settled twice. ``store_event``
+        now refuses to create those, and this pass repairs stores written
+        before that guard existed. Keeping the FIRST occurrence preserves the
+        original postmortem (and, during a provider switch, the original
+        provider's narrative).
 
         Semantic redundancy (same *situation* within a window) is deferred to
         v3: without the state fingerprint, a 30-day window chains and over-merges
         whole streaks into one entry — exactly the bear-memory loss we must avoid.
         """
         seen = set()
+        seen_ids = set()
         kept, removed = [], []
         for e in entries:
             key = (e["ticker"], e["trade_date"], e["rating"])
-            if key in seen:
+            entry_id = e.get("entry_id")
+            if key in seen or (entry_id and entry_id in seen_ids):
                 removed.append(e)
             else:
                 seen.add(key)
+                if entry_id:
+                    seen_ids.add(entry_id)
                 kept.append(e)
         return kept, removed
 
@@ -397,8 +458,13 @@ class TradingMemoryLog:
         return protected + kept, dropped
 
     def _append_distill_queue(self, entries):
-        """Buffer evicted entries for the L3 distillation loop (not hard-deleted)."""
-        if not self._distill_queue_path or not entries:
+        """Buffer evicted entries for the L3 distillation loop (not hard-deleted).
+
+        Guarded directly, not just via ``maintain_memory``: it writes a second
+        file, and frozen mode must leave every artefact untouched even if a new
+        caller reaches this path.
+        """
+        if self._readonly or not self._distill_queue_path or not entries:
             return
         text = self._SEPARATOR.join(self._render_event_entry(e) for e in entries) + self._SEPARATOR
         with open(self._distill_queue_path, "a", encoding="utf-8") as f:
@@ -427,9 +493,19 @@ class TradingMemoryLog:
         else:
             self._lessons_path.write_text("", encoding="utf-8")
 
-    def get_past_context(self, ticker: str, n_same: int = 5, n_cross: int = 3) -> str:
-        """Return formatted past context string for agent prompt injection."""
+    def get_past_context(self, ticker: str, n_same: int = 5, n_cross: int = 3,
+                         as_of: str | None = None) -> str:
+        """Return formatted past context string for agent prompt injection.
+
+        ``as_of`` mirrors :meth:`get_lessons_context`: decisions dated on or
+        after it are excluded so the legacy decision log is time-consistent too.
+        Both arms get the same filter, so the only difference between them stays
+        the L1 layer.
+        """
         entries = [e for e in self.load_entries() if not e.get("pending")]
+        if as_of:
+            cutoff = _as_date(as_of)
+            entries = [e for e in entries if _as_date(e.get("date", "")) < cutoff]
         if not entries:
             return ""
 

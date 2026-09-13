@@ -380,6 +380,14 @@ class OpenAIClient(BaseLLMClient):
                 continue
             llm_kwargs[key] = self.kwargs[key]
 
+        # DeepSeek thinking mode is opt-out via ``extra_body``: the hidden
+        # reasoning tokens are billed as output, and thinking mode is what makes
+        # the API reject ``tool_choice`` (HTTP 400). ``deepseek_thinking=False``
+        # sends the provider's documented disable flag. Carried through
+        # extra_body because the openai SDK validates top-level params.
+        if chat_cls is DeepSeekChatOpenAI and self.kwargs.get("deepseek_thinking") is False:
+            llm_kwargs.setdefault("extra_body", {}).setdefault("thinking", {"type": "disabled"})
+
         # The subclass (provider quirks) comes from the registry spec.
         return chat_cls(**llm_kwargs)
 

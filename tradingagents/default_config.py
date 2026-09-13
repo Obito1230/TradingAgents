@@ -25,6 +25,8 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_GOOGLE_THINKING_LEVEL":   "google_thinking_level",
     "TRADINGAGENTS_OPENAI_REASONING_EFFORT": "openai_reasoning_effort",
     "TRADINGAGENTS_ANTHROPIC_EFFORT":        "anthropic_effort",
+    "TRADINGAGENTS_DEEPSEEK_THINKING":       "deepseek_thinking",
+    "TRADINGAGENTS_POSTMORTEM_THINKING":     "postmortem_thinking",
     # Three-layer memory (L1 events / L3 rules)
     "TRADINGAGENTS_EVENT_ALPHA_THRESHOLD":   "event_alpha_threshold",
     "TRADINGAGENTS_EVENT_PROTECT_THRESHOLD": "event_protect_threshold",
@@ -152,6 +154,16 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "google_thinking_level": None,      # "high", "minimal", etc.
     "openai_reasoning_effort": None,    # "medium", "high", "low"
     "anthropic_effort": None,           # "high", "medium", "low"
+    # DeepSeek's V4 models think by default. Thinking tokens are billed as
+    # output and dominate this pipeline's output spend; thinking mode also
+    # makes the API reject ``tool_choice`` with HTTP 400 ("Thinking mode does
+    # not support this tool_choice"). True keeps the provider default.
+    "deepseek_thinking": True,
+    # Postmortem-only override of the provider thinking flag (None = inherit).
+    # The postmortem reads the whole debate trace and runs a handful of times per
+    # corpus, so it is worth paying for reasoning even when the high-frequency
+    # analyst/debate calls have thinking turned off. DeepSeek-only for now.
+    "postmortem_thinking": None,
     # Sampling temperature, forwarded to every provider when set. None leaves
     # each provider at its own default. Lower values reduce run-to-run
     # variation on models that honor it; reasoning models largely ignore it

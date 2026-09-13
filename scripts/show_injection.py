@@ -44,6 +44,10 @@ from tradingagents.graph.trading_graph import TradingAgentsGraph  # noqa: E402
 def main() -> int:
     ap = argparse.ArgumentParser(description="Show the past_context the PM would receive.")
     ap.add_argument("--ticker", required=True)
+    ap.add_argument("--date", required=True,
+                    help="The decision date the memory would be injected for (YYYY-MM-DD). "
+                         "Required: memory is time-sliced, so without a date there is no "
+                         "single correct answer to 'what would the PM receive'.")
     ap.add_argument("--n-same", type=int, default=5, help="Max same-ticker items per segment.")
     ap.add_argument("--n-cross", type=int, default=3, help="Max cross-ticker event items.")
     ap.add_argument("--raw", action="store_true", help="Print only the assembled string.")
@@ -58,14 +62,16 @@ def main() -> int:
         print(f"lessons file exists = {bool(log._lessons_path and log._lessons_path.exists())}")
         print(f"EVENT entries total = {len(events)}  | for {args.ticker} = {len(ticker_events)}")
         for e in ticker_events:
+            sliced = "  [SLICED OUT: on/after as_of]" if e["trade_date"] >= args.date else ""
             print(
                 f"  - {e['entry_id']}  {e['trade_date']}  {e['rating']}  "
-                f"alpha={e['alpha']}  protected={e['protected']}  hits={e['hits']}"
+                f"alpha={e['alpha']}  protected={e['protected']}  hits={e['hits']}{sliced}"
             )
 
     inst = object.__new__(TradingAgentsGraph)
     inst.memory_log = log
-    context = TradingAgentsGraph._build_past_context(inst, args.ticker)
+    inst.config = DEFAULT_CONFIG
+    context = TradingAgentsGraph._build_past_context(inst, args.ticker, as_of=args.date)
 
     if args.raw:
         print(context)

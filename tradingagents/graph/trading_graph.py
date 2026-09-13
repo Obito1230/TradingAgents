@@ -65,6 +65,26 @@ def _coerce_max_retries(value):
     return n
 
 
+def _as_bool(value, default=None):
+    """Parse a bool or a ``'true'``/``'false'``-style string.
+
+    ``None`` and ``""`` mean "not specified" and yield ``default``. Anything
+    non-empty that is not a recognised boolean raises, matching the fail-loud
+    philosophy of ``default_config._coerce``: a misspelled flag must not quietly
+    select the other behaviour.
+    """
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("true", "1", "yes", "on"):
+        return True
+    if text in ("false", "0", "no", "off"):
+        return False
+    raise ValueError(f"expected a boolean (true/false), got {value!r}")
+
+
 class TradingAgentsGraph:
     """Main class that orchestrates the trading agents framework."""
 
@@ -124,10 +144,23 @@ class TradingAgentsGraph:
 
         # Postmortem agent runs at settlement (Phase B) for extreme |alpha|; it
         # defaults to the deep tier but can be switched to quick via config.
-        postmortem_client = (
-            deep_client if self.config.get("postmortem_llm", "deep") == "deep" else quick_client
+        #
+        # It gets its OWN client so thinking can be configured independently. The
+        # postmortem is a handful of calls per corpus (one per extreme outcome)
+        # over an entire multi-agent debate trace — the one place where extended
+        # reasoning earns its tokens — while the analyst/debate calls are many.
+        # Safe for DeepSeek either way: DeepSeekChatOpenAI suppresses tool_choice
+        # for thinking models, which is what the API 400s on (capabilities.py).
+        postmortem_kwargs = self._get_postmortem_kwargs(llm_kwargs)
+        postmortem_tier = "deep" if self.config.get("postmortem_llm", "deep") == "deep" else "quick"
+        postmortem_client = create_llm_client(
+            provider=self.config["llm_provider"],
+            model=self.config["deep_think_llm" if postmortem_tier == "deep" else "quick_think_llm"],
+            base_url=self.config.get("backend_url"),
+            **postmortem_kwargs,
         )
-        self.postmortem_agent = create_postmortem_agent(postmortem_client.get_llm())
+        self.postmortem_llm = postmortem_client.get_llm()
+        self.postmortem_agent = create_postmortem_agent(self.postmortem_llm)
 
         self.memory_log = TradingMemoryLog(self.config)
 
@@ -165,6 +198,23 @@ class TradingAgentsGraph:
         self.graph = self.workflow.compile()
         self._checkpointer_ctx = None
 
+    def _get_postmortem_kwargs(self, llm_kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Provider kwargs for the postmortem client, on top of the shared ones.
+
+        The postmortem reads an entire multi-agent debate trace and runs only a
+        handful of times per corpus (once per extreme outcome), so it is the one
+        call where extended reasoning earns its tokens — even when the
+        high-frequency analyst/debate calls have thinking turned off.
+
+        ``postmortem_thinking`` unset (None) means "inherit the shared setting".
+        Currently DeepSeek-only; other providers keep their shared knobs.
+        """
+        kwargs = dict(llm_kwargs)
+        thinking = _as_bool(self.config.get("postmortem_thinking"), None)
+        if thinking is not None and str(self.config.get("llm_provider", "")).lower() == "deepseek":
+            kwargs["deepseek_thinking"] = thinking
+        return kwargs
+
     def _get_provider_kwargs(self) -> dict[str, Any]:
         """Get provider-specific kwargs for LLM client creation."""
         kwargs = {}
@@ -184,6 +234,14 @@ class TradingAgentsGraph:
             effort = self.config.get("anthropic_effort")
             if effort:
                 kwargs["effort"] = effort
+
+        elif provider == "deepseek":
+            # Thinking costs output tokens (the hidden reasoning is billed) and
+            # makes the API reject ``tool_choice``. None = provider default; the
+            # postmortem tier can override this separately (postmortem_thinking).
+            thinking = _as_bool(self.config.get("deepseek_thinking"), None)
+            if thinking is not None:
+                kwargs["deepseek_thinking"] = thinking
 
         # Sampling temperature is cross-provider: forward it whenever set.
         # float() here so a value coming from a TRADINGAGENTS_TEMPERATURE env
@@ -262,6 +320,51 @@ class TradingAgentsGraph:
                 return benchmark
         return benchmark_map.get("", "SPY")
 
+    @staticmethod
+    def _window_closes(
+        symbol: str, trade_date: str, holding_days: int,
+    ) -> list[float] | None:
+        """Closes from ``trade_date`` forward, cache-first; None if unavailable.
+
+        Reads the local OHLCV cache (``load_ohlcv``) before touching the network.
+        For a window that is already in the past this means **zero network
+        calls**, which matters for two reasons:
+
+        * reproducibility — a backtest re-scored months later returns the same
+          numbers instead of whatever the vendor serves today;
+        * rate limits — yfinance throttles the bare ``Ticker.history`` path hard
+          (``YFRateLimitError`` after a few dozen calls), and that path is also
+          what settlement uses, so a throttled network silently stops both
+          scoring and event creation.
+
+        The live call stays as the fallback for symbols that are not cached yet.
+        """
+        import pandas as pd
+
+        from tradingagents.dataflows.stockstats_utils import load_ohlcv
+
+        anchor = pd.Timestamp(trade_date)
+        # Ask for a window end past the holding period: load_ohlcv returns
+        # everything up to that date and, for a past date, serves it from cache
+        # without refreshing.
+        cache_end = (anchor + pd.Timedelta(days=holding_days + 12)).strftime("%Y-%m-%d")
+        try:
+            frame = load_ohlcv(symbol, cache_end)
+            window = frame[frame["Date"] >= anchor]
+            closes = [float(v) for v in window["Close"]][: holding_days + 1]
+            if len(closes) >= 2:
+                return closes
+        except Exception as exc:  # noqa: BLE001 — fall through to the live path
+            logger.debug("OHLCV cache miss for %s on %s: %s", symbol, trade_date, exc)
+
+        try:
+            end = (anchor + pd.Timedelta(days=holding_days + 7)).strftime("%Y-%m-%d")
+            history = yf.Ticker(symbol).history(start=trade_date, end=end)
+            return [float(v) for v in history["Close"]][: holding_days + 1]
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Live price lookup failed for %s on %s: %s", symbol, trade_date, exc)
+            return None
+
     def _fetch_returns(
         self, ticker: str, trade_date: str, holding_days: int = 5,
         benchmark: str = "SPY",
@@ -272,32 +375,38 @@ class TradingAgentsGraph:
         caller via ``_resolve_benchmark``). Returns ``(raw_return, alpha_return,
         actual_holding_days)`` or ``(None, None, None)`` if price data is
         unavailable (too recent, delisted, or network error).
+
+        Prices are read cache-first (see ``_window_closes``); the numbers are
+        identical either way, only the source changes.
         """
         from tradingagents.dataflows.symbol_utils import normalize_symbol
 
         try:
-            start = datetime.strptime(trade_date, "%Y-%m-%d")
-            end = start + timedelta(days=holding_days + 7)  # buffer for weekends/holidays
-            end_str = end.strftime("%Y-%m-%d")
-
             # Normalize so the realized-return lookup hits the same instrument
             # the analysis priced (e.g. XAUUSD -> GC=F) (#984). The benchmark is
             # already a canonical Yahoo symbol from ``_resolve_benchmark``.
-            stock = yf.Ticker(normalize_symbol(ticker)).history(start=trade_date, end=end_str)
-            bench = yf.Ticker(benchmark).history(start=trade_date, end=end_str)
+            # Called through the class on purpose: this method uses no instance
+            # state, and callers (tests, scripts) invoke it unbound.
+            stock_closes = TradingAgentsGraph._window_closes(
+                normalize_symbol(ticker), trade_date, holding_days
+            )
+            bench_closes = TradingAgentsGraph._window_closes(
+                benchmark, trade_date, holding_days
+            )
 
-            if len(stock) < 2 or len(bench) < 2:
+            if not stock_closes or not bench_closes:
+                return None, None, None
+            if len(stock_closes) < 2 or len(bench_closes) < 2:
                 return None, None, None
 
-            actual_days = min(holding_days, len(stock) - 1, len(bench) - 1)
-            raw = float(
-                (stock["Close"].iloc[actual_days] - stock["Close"].iloc[0])
-                / stock["Close"].iloc[0]
-            )
-            bench_ret = float(
-                (bench["Close"].iloc[actual_days] - bench["Close"].iloc[0])
-                / bench["Close"].iloc[0]
-            )
+            actual_days = min(holding_days, len(stock_closes) - 1, len(bench_closes) - 1)
+            entry = stock_closes[0]
+            bench_entry = bench_closes[0]
+            if not entry or not bench_entry:
+                return None, None, None
+
+            raw = float((stock_closes[actual_days] - entry) / entry)
+            bench_ret = float((bench_closes[actual_days] - bench_entry) / bench_entry)
             alpha = raw - bench_ret
             return raw, alpha, actual_days
         except Exception as e:
@@ -500,28 +609,34 @@ class TradingAgentsGraph:
             )
         return write_report_tree(final_state, ticker, save_path)
 
-    def _build_past_context(self, ticker: str) -> str:
+    def _build_past_context(self, ticker: str, *, as_of: str) -> str:
         """Compose the past-context string injected into the Portfolio Manager.
 
         Three segments, empty ones dropped: distilled team rules (L3 preamble),
         L1 event summaries (recency top-k), then the legacy decision-log
         reflections as fallback during migration.
+
+        ``as_of`` (the decision date) is **required on purpose**: every segment is
+        filtered to strictly earlier material so a backtest cannot see its own
+        future, and an optional argument would let a future caller silently
+        reintroduce the hindsight leak. Passing it is cheap; forgetting it
+        invalidates the experiment.
         """
-        parts = [self.memory_log.get_rules_context()]
+        parts = [self.memory_log.get_rules_context(as_of=as_of)]
         # Ablation switch: with event_memory_enabled=False the L1 segment is
         # neither read nor written, so the "memory off" arm is exactly the
         # baseline pipeline (legacy decision-log reflections still apply to both
         # arms, keeping the comparison clean).
         if self.config.get("event_memory_enabled", True):
-            parts.append(self.memory_log.get_lessons_context(ticker))
-        parts.append(self.memory_log.get_past_context(ticker))
+            parts.append(self.memory_log.get_lessons_context(ticker, as_of=as_of))
+        parts.append(self.memory_log.get_past_context(ticker, as_of=as_of))
         return "\n\n".join(p for p in parts if p)
 
     def _run_graph(self, company_name, trade_date, asset_type: str = "stock"):
         """Execute the graph and write the resulting state to disk and memory log."""
         # Initialize state — inject memory log context for PM and the
         # deterministically resolved instrument identity for all agents.
-        past_context = self._build_past_context(company_name)
+        past_context = self._build_past_context(company_name, as_of=trade_date)
         instrument_context = self.resolve_instrument_context(company_name, asset_type)
         init_agent_state = self.propagator.create_initial_state(
             company_name,

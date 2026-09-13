@@ -210,13 +210,36 @@ def main() -> int:
         print(f"  - {e['entry_id']}  {e['trade_date']}  {e['ticker']}  alpha={e['alpha']}")
 
     # --- guard: LEAK --------------------------------------------------------
+    # Two ways a scenario can be shown its own future:
+    #   1. an EVENT for the exact (ticker, date) — its own outcome;
+    #   2. an EVENT for the SAME TICKER dated on/after the scenario date — the
+    #      prompt is now time-sliced (get_lessons_context(as_of=...)), so this
+    #      is belt-and-braces, but it also catches a corpus that is temporally
+    #      incompatible with the scenario (nothing usable to remember).
+    events_by_ticker: dict[str, list[str]] = {}
+    for e in events:
+        events_by_ticker.setdefault(e["ticker"], []).append(str(e["trade_date"]))
+
     runnable = []
     for scen in scenarios:
         key = (scen["ticker"], str(scen["date"]))
-        if key in event_keys and not args.allow_leak:
+        if args.allow_leak:
+            runnable.append(scen)
+            continue
+        if key in event_keys:
             print(f"  [SKIP-LEAK] {key[0]} @ {key[1]}: an EVENT for this exact decision is "
                   f"in the store — the 'on' arm would be shown its own outcome.")
             continue
+        usable = [d for d in events_by_ticker.get(key[0], []) if d < key[1]]
+        blocked = [d for d in events_by_ticker.get(key[0], []) if d >= key[1]]
+        if blocked:
+            print(f"  [NOTE] {key[0]} @ {key[1]}: {len(blocked)} EVENT(s) for this ticker are "
+                  f"dated on/after the scenario ({', '.join(sorted(blocked))}) and are "
+                  f"time-sliced out of the prompt.")
+        if not usable:
+            print(f"  [WARN] {key[0]} @ {key[1]}: no usable same-ticker EVENT before this "
+                  f"date — the 'on' arm sees only cross-ticker events (or nothing). "
+                  f"Consider a later scenario date or earlier corpus events.")
         runnable.append(scen)
 
     # --- guard: EMPTY memory -------------------------------------------------

@@ -48,6 +48,28 @@
 - **测试集**:较晚日期的场景,用来跑 A/B。
 - **⚠️ 泄漏规则(硬约束)**:测试场景 (T, D) 的记忆库里**不得存在同一 (T, D) 的 EVENT** —— 那等于把这次决策的**自己的未来结果**喂给它。执行器会自动检测并**跳过**该场景(除非 `--allow-leak`)。
   - 注:`get_lessons_context` 还会注入**跨标的**事件,这是架构设计的一部分(同标的 n_same + 跨标的 n_cross),不算泄漏。
+- **⚠️ 时间一致切分(同等硬约束,2026-09-13 补齐)**:注入的记忆必须是**严格早于决策日 D** 的。只查"(T, D) 完全相等"是不够的 —— 例如语料里有 `600519.SS@2026-01-28` 的事件(结果实现于 01-28→02-04),而测试场景是 `600519.SS@2026-01-22` 时,那条事件对 01-22 的决策就是**未来信息**;跨标的注入同理(6 月的事件不能进入 1 月的 prompt)。
+  - 实现:`get_lessons_context(ticker, as_of=D)` / `get_past_context(ticker, as_of=D)`,由 `_build_past_context(ticker, as_of=trade_date)` 传入;**两臂用同一套过滤**,唯一差异仍是 L1 内容。
+  - 执行器对"同标的 EVENT 日期 ≥ D"会打印 `[NOTE] … time-sliced out`,并在**该标的没有任何可用历史事件**时打印 `[WARN] no usable same-ticker EVENT`。
+  - 推论:**测试场景必须整体晚于语料**。场景日期早于或夹在语料中间时,该场景的记忆臂基本为空,跑出来只是浪费墙钟。
+- **⚠️ 语料日期上界(硬约束,实操最容易踩)**:新增语料场景的日期必须**严格早于最早的测试场景日**。当前最早测试日是 `2026-07-03`,所以语料一律取 `< 2026-07-03`。
+  - 为什么必须写死:按"最近涨跌幅"扫描出来的候选,**排名最高的那几个往往正是测试场景本身**(实测:`600519.SS@2026-07-13` / `300750.SZ@2026-07-03` / `601318.SS@2026-07-13` 既是扫描前三名,也是测试集)。拿它们当语料 → `(T, D)` 完全命中 → 执行器 `[SKIP-LEAK]` 全部跳过 → **P1 场景数归零**。
+  - 且日期 ≥ 测试日的语料事件会被**时间切片切掉**,对测试 prompt 毫无贡献(只是白跑一次分析)。
+  - 安全取数区间示例:`scan_demo_pool.py --start 2025-10-01 --end 2026-06-25`。
+- **⚠️ 记忆库必须在 P1 之前建完并冻结(硬约束)**:`run_experiment.py` 的每次 run 在**开始时**各读一次记忆库。若 pilot 运行期间新增或结算了事件,先跑的 run 与后跑的 run 读到的记忆不同 → 两臂不再可比。**pilot 运行期间不要执行 `settle_now.py` / `run_pool.py`**;跑完再动。
+- **⚠️ 语料构建必须串行**:记忆库没有文件锁,两个进程同时写会互相覆盖(丢条目或写坏)。一次只跑一个 `run_pool` / `settle_now`。
+
+### 2.2.1 评估集必须按协议盲选(硬约束,写死)
+
+**测试场景不得依据其结果来挑选。** 这条比上面几条更根本 —— 违反它,整个数字作废,而前面所有工程护栏都拦不住。
+
+- **现状声明**:当前 `exp_scenarios.json` 的三个场景是用 `scan_demo_pool.py --min-abs 0.04` 按**已实现涨跌**筛出来的,即在**因变量上选样本**(selection on the dependent variable)。
+  - 允许用途:**P1 pilot 探路**(验证链路、看 token 差、看评级是否被记忆改变)。
+  - **禁止用途**:作为论文报告的命中率数字。
+- **论文评估集的选择规则**:先定规则、写进实验日志,**再取数**。例如"在区间 `[S, E]` 内,对固定标的池按固定步长取每个标的的第 k 个交易日",规则与结果无关。
+- **取数后不得因为结果不好而替换场景**;确需替换必须留痕(换了哪个、为什么),否则构成 p-hacking。
+- 同一原则已写在 `demo_pool_ashare.json` 的 readme 里:"论文评估集必须按协议盲选,与结果无关"。
+- **低价数据快照**:`data_cache_dir` 里的 OHLCV 缓存文件按"**当天**"命名(5 年窗口 → 今天),**每天滚动**,所以它不是永久档案。论文数字产出时**把整个 `data_cache_dir` 复制成冻结产物**(如 `experiments/price_cache_snapshot/`),否则同一历史窗口在另一天重算可能因复权调整而不同 → 不可复现。
 
 ### 2.3 记忆"冻结"设计(推荐主实验)
 
@@ -148,6 +170,22 @@ cd D:\project_create\TradingAgents
 - 换 provider 必须在**跑正式实验之前**完成,并记录:provider、deep/quick 模型 ID、温度、是否使用 thinking 模式。
 - 内容审核(如 GLM 1301)会确定性打断 run → 已有缓解:审核感知重试 + 复盘失败时仍写占位事件(不丢极端事件)+ `--analysts` 裁剪。**若某 provider 持续拦截,应作为限制声明,而不是静默换 provider。**
 - 若更换 provider 后重录 Demo,应说明"演示与实验使用同一 provider"。
+
+### 7.1 冻结配置清单(论文必须原样报告)
+
+| 项 | 值 | 备注 |
+|---|---|---|
+| provider | `deepseek` | 账户 `/models` 实际提供 `deepseek-flash`、`deepseek-v4-pro` |
+| deep / quick 模型 | `deepseek-flash` / `deepseek-flash` | 同档 |
+| **管线思考模式** | **关闭**(`TRADINGAGENTS_DEEPSEEK_THINKING=false`) | 省输出 token;思考 token 按输出计费 |
+| **复盘思考模式** | **开启**(`TRADINGAGENTS_POSTMORTEM_THINKING=true`) | 复盘读完整辩论痕迹、每语料只跑几次,最值得花推理 token |
+| 复盘档位 | `postmortem_llm=quick` | 走 quick 档但单独开思考 → 必须给它独立客户端(已实现) |
+| 温度 | 见 `TRADINGAGENTS_TEMPERATURE` | 未设则各 provider 默认 |
+| 关闭的数据源 | `social,macro,prediction_markets` | **两臂同档** |
+| 输出语言 | Chinese | 影响 token 统计,须与基线一起报告 |
+
+- **思考开关也是实验变量**:两臂必须同档。`postmortem_thinking` 默认 `None`(=继承 `deepseek_thinking`),显式设值才分层。
+- 深度模型的能力差异:**思考开启的 DeepSeek 拒绝 `tool_choice`**;客户端会为思考型号自动抑制该参数(见 `llm_clients/capabilities.py`)。模型 ID 若不在能力表里会退回默认(发送 `tool_choice`)并触发 `400 Thinking mode does not support this tool_choice` —— 换模型前先确认能力表已登记。
 
 ---
 

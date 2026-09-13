@@ -1,5 +1,6 @@
 """Tests for TradingMemoryLog — storage, deferred reflection, PM injection, legacy removal."""
 
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -13,6 +14,19 @@ from tradingagents.graph.reflection import Reflector
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
 _SEP = TradingMemoryLog._SEPARATOR
+
+
+@contextmanager
+def no_price_cache():
+    """Force ``_fetch_returns`` onto its live path.
+
+    It reads the local OHLCV cache first, so a test that mocks ``yf.Ticker``
+    must also make the cache miss — otherwise it depends on the developer's
+    cache contents (or reaches the network) before the mock is consulted.
+    """
+    with patch("tradingagents.dataflows.stockstats_utils.load_ohlcv",
+               side_effect=RuntimeError("no cached OHLCV")):
+        yield
 
 DECISION_BUY = "Rating: Buy\nEnter at $189-192, 6% portfolio cap."
 DECISION_OVERWEIGHT = (
@@ -490,7 +504,7 @@ class TestDeferredReflection:
         stock_prices = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0]
         spy_prices   = [400.0, 402.0, 404.0, 403.0, 405.0, 406.0]
         mock_graph = MagicMock(spec=TradingAgentsGraph)
-        with patch("yfinance.Ticker") as mock_ticker_cls:
+        with no_price_cache(), patch("yfinance.Ticker") as mock_ticker_cls:
             def _make_ticker(sym):
                 m = MagicMock()
                 m.history.return_value = _price_df(spy_prices if sym == "SPY" else stock_prices)
@@ -504,7 +518,7 @@ class TestDeferredReflection:
     def test_fetch_returns_too_recent(self):
         """Only 1 data point available → returns (None, None, None), no crash."""
         mock_graph = MagicMock(spec=TradingAgentsGraph)
-        with patch("yfinance.Ticker") as mock_ticker_cls:
+        with no_price_cache(), patch("yfinance.Ticker") as mock_ticker_cls:
             m = MagicMock()
             m.history.return_value = _price_df([100.0])
             mock_ticker_cls.return_value = m
@@ -514,7 +528,7 @@ class TestDeferredReflection:
     def test_fetch_returns_delisted(self):
         """Empty DataFrame → returns (None, None, None), no crash."""
         mock_graph = MagicMock(spec=TradingAgentsGraph)
-        with patch("yfinance.Ticker") as mock_ticker_cls:
+        with no_price_cache(), patch("yfinance.Ticker") as mock_ticker_cls:
             m = MagicMock()
             m.history.return_value = pd.DataFrame({"Close": []})
             mock_ticker_cls.return_value = m
@@ -526,7 +540,7 @@ class TestDeferredReflection:
         stock_prices = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0]
         spy_prices   = [400.0, 402.0, 403.0]
         mock_graph = MagicMock(spec=TradingAgentsGraph)
-        with patch("yfinance.Ticker") as mock_ticker_cls:
+        with no_price_cache(), patch("yfinance.Ticker") as mock_ticker_cls:
             def _make_ticker(sym):
                 m = MagicMock()
                 m.history.return_value = _price_df(spy_prices if sym == "SPY" else stock_prices)

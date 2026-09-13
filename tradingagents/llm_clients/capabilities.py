@@ -96,6 +96,13 @@ _BY_ID: dict[str, ModelCapabilities] = {
     "deepseek-reasoner": _DEEPSEEK_THINKING,
     "deepseek-v4-flash": _DEEPSEEK_THINKING,
     "deepseek-v4-pro": _DEEPSEEK_THINKING,
+    # The live DeepSeek API serves ``deepseek-flash`` (and ``deepseek-v4-pro``);
+    # the ``deepseek-v4-*`` names above are aliases for the same thinking model.
+    # Without this entry ``deepseek-flash`` falls through to _DEFAULT, which
+    # claims supports_tool_choice=True — so every structured-output call sent
+    # ``tool_choice`` and was rejected with HTTP 400 "Thinking mode does not
+    # support this tool_choice".
+    "deepseek-flash": _DEEPSEEK_THINKING,
     # MiniMax — full official model lineup per
     # platform.minimax.io/docs/api-reference/text-openai-api
     "MiniMax-M2.7": _MINIMAX_THINKING,

@@ -5,7 +5,8 @@ Runs AFTER the two-run settle recipe and checks the on-disk artifacts, no LLM:
   1. trading_lessons.md has an EVENT entry for (ticker, trade_date)
   2. the decision log entry is resolved (no pending left)
   3. cost_log.csv recorded the analysis (and settle) pass(es)
-  4. get_lessons_context() actually injects that event (recency/direction floor)
+  4. get_lessons_context(as_of=event_date+1d) actually injects that event
+     (time-sliced view — the unfiltered store is never what a real run sees)
 
 Usage:
   python scripts/verify_l1.py --ticker MSFT --trade-date 2026-07-23 --expect-settle
@@ -20,6 +21,7 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -99,10 +101,13 @@ def main() -> int:
     else:
         check("cost_log.csv recorded the run(s)", False, f"not found: {cost_path}")
 
-    # 4. injection surfaces the event
-    ctx = log.get_lessons_context(args.ticker)
+    # 4. injection surfaces the event — for a decision made AFTER it settled.
+    # Memory is time-sliced, so asking with no as_of would probe an unfiltered
+    # store that no real run ever sees; ask for the day after the event.
+    as_of = (date.fromisoformat(str(args.trade_date)[:10]) + timedelta(days=1)).isoformat()
+    ctx = log.get_lessons_context(args.ticker, as_of=as_of)
     check("event is injected into past_context", args.trade_date in ctx,
-          "get_lessons_context contains the event date")
+          f"get_lessons_context(as_of={as_of}) contains the event date")
 
     print(f"L1 acceptance check for {args.ticker} @ {args.trade_date}")
     print(f"lessons_path = {log._lessons_path}")

@@ -6,11 +6,25 @@ the news path: a broker symbol like XAUUSD must resolve to the same Yahoo symbol
 hit the right instrument instead of failing/mismatching.
 """
 import pandas as pd
+import pytest
 
 import tradingagents.agents.utils.agent_utils as au
 import tradingagents.dataflows.yfinance_news as ynews
 import tradingagents.graph.trading_graph as tg
 from tradingagents.graph.trading_graph import TradingAgentsGraph
+
+
+@pytest.fixture
+def no_price_cache(monkeypatch):
+    """Force the live path: ``_fetch_returns`` reads the local OHLCV cache first.
+
+    Without this the test would depend on the developer's cache contents (or hit
+    the network) before ever reaching the mocked ``yf.Ticker``.
+    """
+    def _miss(symbol, curr_date):
+        raise RuntimeError(f"no cached OHLCV for {symbol}")
+
+    monkeypatch.setattr("tradingagents.dataflows.stockstats_utils.load_ohlcv", _miss)
 
 
 def test_identity_lookup_normalizes_symbol(monkeypatch):
@@ -33,7 +47,7 @@ def test_identity_lookup_normalizes_symbol(monkeypatch):
     assert identity.get("company_name") == "Gold Futures"
 
 
-def test_fetch_returns_normalizes_symbol(monkeypatch):
+def test_fetch_returns_normalizes_symbol(monkeypatch, no_price_cache):
     queried = []
 
     class FakeTicker:
@@ -45,7 +59,7 @@ def test_fetch_returns_normalizes_symbol(monkeypatch):
 
     monkeypatch.setattr(tg.yf, "Ticker", FakeTicker)
 
-    # _fetch_returns does not use ``self``; call unbound to avoid building the graph.
+    # _fetch_returns uses no instance state; call unbound to avoid building the graph.
     raw, alpha, days = TradingAgentsGraph._fetch_returns(
         None, "XAUUSD", "2025-01-02", holding_days=5, benchmark="SPY"
     )

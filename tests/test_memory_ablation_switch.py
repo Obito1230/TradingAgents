@@ -40,7 +40,7 @@ def test_l1_segment_injected_when_enabled(tmp_path):
     inst = _instance(tmp_path, enabled=True)
     inst.memory_log.store_event("E-1", "NVDA", "2026-01-05", "Buy", 0.31, 0.30, "summary text", "p")
 
-    ctx = TradingAgentsGraph._build_past_context(inst, "NVDA")
+    ctx = TradingAgentsGraph._build_past_context(inst, "NVDA", as_of="2026-12-31")
 
     assert "summary text" in ctx
     assert "Past extreme events for NVDA" in ctx
@@ -50,7 +50,7 @@ def test_l1_segment_omitted_when_disabled(tmp_path):
     inst = _instance(tmp_path, enabled=False)
     inst.memory_log.store_event("E-1", "NVDA", "2026-01-05", "Buy", 0.31, 0.30, "summary text", "p")
 
-    ctx = TradingAgentsGraph._build_past_context(inst, "NVDA")
+    ctx = TradingAgentsGraph._build_past_context(inst, "NVDA", as_of="2026-12-31")
 
     assert "summary text" not in ctx
     assert "Past extreme events" not in ctx
@@ -65,7 +65,7 @@ def test_legacy_reflections_present_in_both_arms(tmp_path):
         inst.memory_log = TradingMemoryLog(inst.config)
         _seed_legacy_resolved(inst.memory_log)
 
-        ctx = TradingAgentsGraph._build_past_context(inst, "NVDA")
+        ctx = TradingAgentsGraph._build_past_context(inst, "NVDA", as_of="2026-12-31")
         assert "Good call." in ctx
         assert "Past analyses of NVDA" in ctx
 

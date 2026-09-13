@@ -130,14 +130,20 @@ MODEL_OPTIONS: ProviderModeOptions = {
     # (2026-07-24) and now map to V4 Flash; expose the V4 IDs directly. V4 Flash
     # serves both non-thinking and thinking modes (the DeepSeekChatOpenAI client
     # handles the reasoning_content round-trip).
+    #
+    # The live API advertises ``deepseek-flash`` and ``deepseek-v4-pro``; the
+    # ``deepseek-v4-flash`` alias is accepted but is not what /models returns,
+    # so the served ID is listed first and validate_model knows about it.
     "deepseek": {
         "quick": [
-            ("DeepSeek V4 Flash - Latest fast model, thinking + non-thinking", "deepseek-v4-flash"),
+            ("DeepSeek Flash - Latest fast model, thinking + non-thinking", "deepseek-flash"),
+            ("DeepSeek V4 Flash (alias for deepseek-flash)", "deepseek-v4-flash"),
             ("Custom model ID", "custom"),
         ],
         "deep": [
             ("DeepSeek V4 Pro - Latest flagship", "deepseek-v4-pro"),
-            ("DeepSeek V4 Flash - Fast, supports thinking", "deepseek-v4-flash"),
+            ("DeepSeek Flash - Fast, supports thinking", "deepseek-flash"),
+            ("DeepSeek V4 Flash (alias for deepseek-flash)", "deepseek-v4-flash"),
             ("Custom model ID", "custom"),
         ],
     },

@@ -75,6 +75,11 @@ PRICE_USD_PER_1M: dict[str, tuple[float, float]] = {
     "deepseek-chat": (0.27, 1.10),
     "deepseek-reasoner": (0.55, 2.19),
     "deepseek-v4-flash": (0.20, 0.80),
+    # The live API serves ``deepseek-flash``; same model as deepseek-v4-flash, so
+    # it carries the same price. Without this entry match_price() returns None
+    # and every DeepSeek run is logged with an EMPTY cost_usd column.
+    # Confirm against the provider's price page before publishing a cost table.
+    "deepseek-flash": (0.20, 0.80),
     "qwen3.7-plus": (0.20, 0.80),
     "glm-5": (0.30, 1.20),
     "grok-4.3": (2.0, 8.0),

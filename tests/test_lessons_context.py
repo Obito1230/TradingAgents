@@ -93,7 +93,7 @@ def _make_graph(tmp_path):
 def test_build_past_context_events_only(tmp_path):
     inst = _make_graph(tmp_path)
     _store(inst.memory_log, "E-1", "MSFT", "2026-07-23", 0.31, "summary text")
-    ctx = TradingAgentsGraph._build_past_context(inst, "MSFT")
+    ctx = TradingAgentsGraph._build_past_context(inst, "MSFT", as_of="2026-12-31")
     assert "summary text" in ctx
     assert "Past extreme events for MSFT" in ctx
 
@@ -102,7 +102,7 @@ def test_build_past_context_legacy_fallback(tmp_path):
     inst = _make_graph(tmp_path)
     inst.memory_log.store_decision("MSFT", "2026-01-05", "Rating: Buy\nBuy")
     inst.memory_log.update_with_outcome("MSFT", "2026-01-05", 0.05, 0.02, 5, "Good call.")
-    ctx = TradingAgentsGraph._build_past_context(inst, "MSFT")
+    ctx = TradingAgentsGraph._build_past_context(inst, "MSFT", as_of="2026-12-31")
     assert "Good call." in ctx
     assert "Past analyses of MSFT" in ctx
 
@@ -112,6 +112,6 @@ def test_build_past_context_combines_segments(tmp_path):
     _store(inst.memory_log, "E-1", "MSFT", "2026-07-23", 0.31, "summary text")
     inst.memory_log.store_decision("MSFT", "2026-01-05", "Rating: Buy\nBuy")
     inst.memory_log.update_with_outcome("MSFT", "2026-01-05", 0.05, 0.02, 5, "Good call.")
-    ctx = TradingAgentsGraph._build_past_context(inst, "MSFT")
+    ctx = TradingAgentsGraph._build_past_context(inst, "MSFT", as_of="2026-12-31")
     # events segment (L1) precedes the legacy reflection segment
     assert ctx.index("summary text") < ctx.index("Good call.")
