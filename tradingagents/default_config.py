@@ -35,6 +35,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_DISTILL_INTERVAL_DAYS":   "distill_interval_days",
     "TRADINGAGENTS_POSTMORTEM_LLM":          "postmortem_llm",
     "TRADINGAGENTS_MIN_EVENTS_PER_DIRECTION": "min_events_per_direction",
+    "TRADINGAGENTS_SETTLEMENT_HOLDING_DAYS":  "settlement_holding_days",
     # External data sources disabled for this run (comma-separated):
     # social (StockTwits+Reddit), macro (FRED), prediction_markets (Polymarket).
     "TRADINGAGENTS_DISABLED_SOURCES":        "disabled_sources",
@@ -133,6 +134,11 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Keep at least this many win AND loss events regardless of recency, so a
     # long bull run can't evict or bury the last bear-market lessons.
     "min_events_per_direction": 3,
+    # Forward window (exchange trading days) used to settle a pending decision
+    # and score the A/B. Settlement now REQUIRES the full window to have elapsed:
+    # a same-ticker run shortly after the decision would otherwise record a
+    # 1–2 day return as the N-day outcome.
+    "settlement_holding_days": 5,
     # External sources disabled for this run. Disabling holds the input surface
     # constant across experiment arms when a source is unusable/unavailable
     # (e.g. A-share runs) instead of letting it fail nondeterministically in one

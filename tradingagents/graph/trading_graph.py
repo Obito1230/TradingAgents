@@ -483,7 +483,8 @@ class TradingAgentsGraph:
 
         Fetches returns for each same-ticker pending entry, generates reflections,
         then writes all updates in a single atomic batch write to avoid redundant I/O.
-        Skips entries whose price data is not yet available (too recent or delisted).
+        Skips entries whose price data is not yet available (too recent or delisted)
+        and entries whose holding window has not fully elapsed.
 
         Trade-off: only same-ticker entries are resolved per run.  Entries for
         other tickers accumulate until that ticker is run again.
@@ -498,14 +499,29 @@ class TradingAgentsGraph:
         if not pending:
             return
 
+        holding_days = 5
+        if isinstance(config, dict):
+            holding_days = int(config.get("settlement_holding_days", 5) or 5)
         benchmark = self._resolve_benchmark(ticker)
         updates = []
         for entry in pending:
             raw, alpha, days = self._fetch_returns(
-                ticker, entry["date"], benchmark=benchmark,
+                ticker, entry["date"], holding_days=holding_days, benchmark=benchmark,
             )
             if raw is None:
                 continue  # price not available yet — try again next run
+            if days is not None and days < holding_days:
+                # The window has not fully elapsed: a same-ticker run shortly
+                # after the decision settles with fewer bars, and `_fetch_returns`
+                # clamps to what exists. Recording a short-window return as the
+                # N-day outcome silently corrupts the event (one legacy entry was
+                # settled over 2 bars). Wait, exactly like "price not available".
+                logger.info(
+                    "Holding window incomplete for %s on %s (%s/%s days); "
+                    "deferring settlement to a later run",
+                    ticker, entry["date"], days, holding_days,
+                )
+                continue
             reflection = self.reflector.reflect_on_final_decision(
                 final_decision=entry.get("decision", ""),
                 raw_return=raw,
@@ -610,11 +626,25 @@ class TradingAgentsGraph:
         return write_report_tree(final_state, ticker, save_path)
 
     def _build_past_context(self, ticker: str, *, as_of: str) -> str:
-        """Compose the past-context string injected into the Portfolio Manager.
+        """Compose the memory segment injected into the Portfolio Manager.
 
-        Three segments, empty ones dropped: distilled team rules (L3 preamble),
-        L1 event summaries (recency top-k), then the legacy decision-log
-        reflections as fallback during migration.
+        The two ablation arms are **budget-substitutive**, not additive:
+
+        * ``event_memory_enabled=False`` (baseline "off"): the legacy decision-log
+          reflections — i.e. the upstream framework's behaviour, unchanged.
+        * ``event_memory_enabled=True`` ("on"): the L3 rule preamble + the L1
+          event summaries, **replacing** the legacy segment.
+
+        Substitution is what makes the C2 claim testable ("same injection budget,
+        better selection"). Adding L1 *on top of* the legacy segment instead hands
+        the "on" arm ~50–90% more context (measured: +54%, +76%, +86%; every L1
+        event duplicates a legacy entry), so a win could not be attributed to
+        better memory rather than simply more memory.
+
+        One exception: when the L1 (+L3) segments are both empty for this decision
+        — no event strictly before ``as_of`` — the legacy segment is used as a
+        fallback, so no arm is ever left with no memory at all. That can only
+        dilute a measured effect toward zero, never inflate it.
 
         ``as_of`` (the decision date) is **required on purpose**: every segment is
         filtered to strictly earlier material so a backtest cannot see its own
@@ -622,15 +652,20 @@ class TradingAgentsGraph:
         reintroduce the hindsight leak. Passing it is cheap; forgetting it
         invalidates the experiment.
         """
-        parts = [self.memory_log.get_rules_context(as_of=as_of)]
-        # Ablation switch: with event_memory_enabled=False the L1 segment is
-        # neither read nor written, so the "memory off" arm is exactly the
-        # baseline pipeline (legacy decision-log reflections still apply to both
-        # arms, keeping the comparison clean).
-        if self.config.get("event_memory_enabled", True):
-            parts.append(self.memory_log.get_lessons_context(ticker, as_of=as_of))
-        parts.append(self.memory_log.get_past_context(ticker, as_of=as_of))
-        return "\n\n".join(p for p in parts if p)
+        # Ablation switch: with event_memory_enabled=False the L1/L3 segments are
+        # neither read nor written, so the "off" arm is exactly the baseline
+        # pipeline. See experiment_plan.md §2.2.1 / §4 #19.
+        if not self.config.get("event_memory_enabled", True):
+            return self.memory_log.get_past_context(ticker, as_of=as_of)
+
+        parts = [
+            self.memory_log.get_rules_context(as_of=as_of),
+            self.memory_log.get_lessons_context(ticker, as_of=as_of),
+        ]
+        context = "\n\n".join(p for p in parts if p)
+        if context:
+            return context
+        return self.memory_log.get_past_context(ticker, as_of=as_of)
 
     def _run_graph(self, company_name, trade_date, asset_type: str = "stock"):
         """Execute the graph and write the resulting state to disk and memory log."""

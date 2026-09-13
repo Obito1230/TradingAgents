@@ -679,6 +679,56 @@ class TestDeferredReflection:
         assert "+5.0%" in entries[0]["raw"]
         assert "+2.0%" in entries[0]["alpha"]
 
+    def _mock_graph_for_settlement(self, tmp_path, fetched):
+        log = make_log(tmp_path)
+        log.store_decision("NVDA", "2026-01-05", DECISION_BUY)
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        mock_graph.memory_log = log
+        mock_graph.reflector = MagicMock()
+        mock_graph.reflector.reflect_on_final_decision.return_value = "reflection"
+        mock_graph._fetch_returns = MagicMock(return_value=fetched)
+        return log, mock_graph
+
+    def test_resolve_defers_when_the_holding_window_is_incomplete(self, tmp_path):
+        """A short window must never be recorded as the N-day outcome.
+
+        Regression: settlement only required *some* price data, so a same-ticker
+        run shortly after the decision recorded a 1–2 day return as the 5-day
+        result (a legacy entry shows ``2d``). That silently corrupts both the
+        reflection and any resulting L1 event.
+        """
+        log, mock_graph = self._mock_graph_for_settlement(tmp_path, (0.05, 0.02, 2))
+
+        TradingAgentsGraph._resolve_pending_entries(mock_graph, "NVDA")
+
+        assert len(log.get_pending_entries()) == 1          # still pending
+        mock_graph.reflector.reflect_on_final_decision.assert_not_called()
+
+    def test_resolve_proceeds_when_the_window_is_complete(self, tmp_path):
+        log, mock_graph = self._mock_graph_for_settlement(tmp_path, (0.05, 0.02, 5))
+
+        TradingAgentsGraph._resolve_pending_entries(mock_graph, "NVDA")
+
+        assert log.get_pending_entries() == []
+
+    def test_settlement_window_is_configurable(self, tmp_path):
+        """An explicit shorter window is honoured, so the guard is not hardcoded."""
+        log, mock_graph = self._mock_graph_for_settlement(tmp_path, (0.05, 0.02, 3))
+        mock_graph.config = {"settlement_holding_days": 3}
+
+        TradingAgentsGraph._resolve_pending_entries(mock_graph, "NVDA")
+
+        assert log.get_pending_entries() == []
+        mock_graph._fetch_returns.assert_called_once_with(
+            "NVDA", "2026-01-05", holding_days=3, benchmark=mock_graph._resolve_benchmark.return_value
+        )
+
+    def test_settlement_window_ships_with_an_env_override(self):
+        from tradingagents.default_config import DEFAULT_CONFIG, _ENV_OVERRIDES
+
+        assert DEFAULT_CONFIG["settlement_holding_days"] == 5
+        assert _ENV_OVERRIDES["TRADINGAGENTS_SETTLEMENT_HOLDING_DAYS"] == "settlement_holding_days"
+
 
 # ---------------------------------------------------------------------------
 # Portfolio Manager injection: past_context in state and prompt

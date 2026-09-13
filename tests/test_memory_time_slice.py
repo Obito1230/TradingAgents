@@ -192,19 +192,40 @@ def test_build_past_context_hides_future_material(tmp_path):
 
     ctx = TradingAgentsGraph._build_past_context(inst, "NVDA", as_of="2026-03-01")
 
-    assert "OLD summary" in ctx and "OLD reflection" in ctx
-    assert "NEW summary" not in ctx and "NEW reflection" not in ctx
+    assert "OLD summary" in ctx
+    assert "NEW summary" not in ctx
+    # L1 is on and non-empty, so the legacy segment is replaced (not added):
+    assert "OLD reflection" not in ctx
+    assert "NEW reflection" not in ctx
 
 
-def test_l1_segment_is_absent_when_nothing_precedes_the_decision(tmp_path):
-    """A scenario dated before the whole corpus has no L1 memory to show."""
+def test_nothing_before_the_decision_yields_no_memory(tmp_path):
+    """A scenario dated before the whole corpus has nothing to inject at all —
+    neither L1 nor the legacy fallback."""
     inst = _graph(tmp_path)
     _seeded(tmp_path)
 
     ctx = TradingAgentsGraph._build_past_context(inst, "NVDA", as_of="2025-12-01")
 
-    assert "OLD summary" not in ctx
-    assert "NEW summary" not in ctx
+    assert ctx == ""
+
+
+def test_l1_empty_falls_back_to_legacy(tmp_path):
+    """No L1 event in the window → the legacy segment is used instead, so an arm
+    is never left with no memory at all (this can only dilute an effect, never
+    inflate it)."""
+    config = _config(tmp_path)
+    log = TradingMemoryLog(config)
+    log.store_decision("NVDA", "2026-01-05", "Rating: Buy\nBuy")
+    log.update_with_outcome("NVDA", "2026-01-05", 0.005, 0.002, 5, "tiny call")
+    inst = object.__new__(TradingAgentsGraph)
+    inst.config = config
+    inst.memory_log = log
+
+    ctx = TradingAgentsGraph._build_past_context(inst, "NVDA", as_of="2026-06-01")
+
+    assert "tiny call" in ctx
+    assert log.load_lessons() == []          # no L1 event exists, hence the fallback
     assert "Past extreme events" not in ctx
 
 

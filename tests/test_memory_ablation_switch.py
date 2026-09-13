@@ -56,8 +56,14 @@ def test_l1_segment_omitted_when_disabled(tmp_path):
     assert "Past extreme events" not in ctx
 
 
-def test_legacy_reflections_present_in_both_arms(tmp_path):
-    """The baseline injection must not change between arms (clean comparison)."""
+def test_arms_are_budget_substitutive(tmp_path):
+    """The baseline arm gets legacy; the treatment arm gets L1 instead of it.
+
+    Only legacy is seeded, so the "on" arm has no L1 event → it falls back to
+    legacy and the two arms coincide (a deliberately conservative case: no L1 to
+    offer means no effect, never an inflated one).
+    """
+    contexts = {}
     for enabled in (True, False):
         inst = _instance(tmp_path / str(enabled), enabled=enabled)
         inst.config["memory_log_path"] = str(tmp_path / str(enabled) / "trading_memory.md")
@@ -65,9 +71,26 @@ def test_legacy_reflections_present_in_both_arms(tmp_path):
         inst.memory_log = TradingMemoryLog(inst.config)
         _seed_legacy_resolved(inst.memory_log)
 
-        ctx = TradingAgentsGraph._build_past_context(inst, "NVDA", as_of="2026-12-31")
-        assert "Good call." in ctx
-        assert "Past analyses of NVDA" in ctx
+        contexts[enabled] = TradingAgentsGraph._build_past_context(
+            inst, "NVDA", as_of="2026-12-31")
+
+    assert "Good call." in contexts[False]
+    assert "Past analyses of NVDA" in contexts[False]
+    assert contexts[True] == contexts[False]      # empty L1 → legacy fallback
+
+
+def test_on_arm_drops_legacy_when_l1_has_something(tmp_path):
+    """With an L1 event present, the 'on' arm is L1 only — not L1 + legacy."""
+    inst = _instance(tmp_path, enabled=True)
+    inst.memory_log.store_event("E-1", "NVDA", "2026-01-05", "Buy", 0.31, 0.30,
+                                "L1 summary", "p")
+    _seed_legacy_resolved(inst.memory_log)
+
+    ctx = TradingAgentsGraph._build_past_context(inst, "NVDA", as_of="2026-12-31")
+
+    assert "L1 summary" in ctx
+    assert "Good call." not in ctx
+    assert "Past analyses of NVDA" not in ctx
 
 
 # --- WRITE side --------------------------------------------------------------
